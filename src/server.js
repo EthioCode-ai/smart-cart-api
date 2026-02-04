@@ -8,6 +8,7 @@ const layoutsRoutes = require('./routes/layouts');
 const contributionsRoutes = require('./routes/contributions');
 const rewardsRoutes = require('./routes/rewards');
 const authRoutes = require('./routes/auth');
+const videoProcessingRoutes = require('./routes/videoProcessing');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -43,6 +44,7 @@ app.use('/api/stores', storesRoutes);
 app.use('/api/layouts', layoutsRoutes);
 app.use('/api/contributions', contributionsRoutes);
 app.use('/api/rewards', rewardsRoutes);
+app.use('/api/video-processing', videoProcessingRoutes);
 
 // 404 handler
 app.use((req, res) => {
