@@ -44,22 +44,20 @@ router.get('/nearby', optionalAuth, async (req, res) => {
     const radiusKm = parseFloat(radius);
 
     // Haversine formula for distance calculation
+    // Haversine formula for distance calculation
     const result = await query(
-      `SELECT s.*,
-        (6371 * acos(cos(radians($1)) * cos(radians(latitude)) * 
-         cos(radians(longitude) - radians($2)) + 
-         sin(radians($1)) * sin(radians(latitude)))) AS distance,
-        CASE WHEN fs.id IS NOT NULL THEN true ELSE false END as is_favorite,
-        fs.description as favorite_note
-       FROM stores s
-       LEFT JOIN favorite_stores fs ON s.id = fs.store_id AND fs.user_id = $4
+      `SELECT *, 
+        (6371 * acos(cos(radians($1)) * cos(radians(latitude)) *
+         cos(radians(longitude) - radians($2)) +
+         sin(radians($1)) * sin(radians(latitude)))) AS distance
+       FROM stores
        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-       HAVING (6371 * acos(cos(radians($1)) * cos(radians(latitude)) * 
-               cos(radians(longitude) - radians($2)) + 
-               sin(radians($1)) * sin(radians(latitude)))) < $3
+         AND (6371 * acos(cos(radians($1)) * cos(radians(latitude)) *
+              cos(radians(longitude) - radians($2)) +
+              sin(radians($1)) * sin(radians(latitude)))) < $3
        ORDER BY distance
        LIMIT 50`,
-      [latitude, longitude, radiusKm, req.user?.id || null]
+      [latitude, longitude, radiusKm]
     );
 
     const stores = result.rows.map(row => ({
