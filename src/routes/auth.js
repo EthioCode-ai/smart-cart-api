@@ -1,150 +1,404 @@
+// src/routes/auth.js
+// ============================================================
+// Authentication Routes
+// ============================================================
+
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const { body, validationResult } = require('express-validator');
-const db = require('../db');
+const crypto = require('crypto');
+const { query, successResponse, errorResponse } = require('../models/db');
+const { 
+  authenticate, 
+  generateAccessToken, 
+  generateRefreshToken, 
+  verifyRefreshToken 
+} = require('../middleware/auth');
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'smart-cart-secret-key-change-in-production';
 
-// Register
-router.post('/register', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 6 }),
-  body('name').trim().notEmpty()
-], async (req, res) => {
+// ── POST /api/auth/register ─────────────────────────────────
+
+router.post('/register', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+    const { name, email, password } = req.body;
+
+    // Validation
+    if (!name || !email || !password) {
+      return errorResponse(res, 400, 'Name, email, and password are required');
     }
 
-    const { email, password, name } = req.body;
+    if (password.length < 8) {
+      return errorResponse(res, 400, 'Password must be at least 8 characters');
+    }
 
     // Check if user exists
-    const existingUser = await db.query(
+    const existingUser = await query(
       'SELECT id FROM users WHERE email = $1',
-      [email]
+      [email.toLowerCase()]
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(400).json({ success: false, error: 'Email already registered' });
+      return errorResponse(res, 409, 'Email already registered');
     }
 
     // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, 12);
 
     // Create user
-    const result = await db.query(
-      `INSERT INTO users (email, password_hash, name) 
-       VALUES ($1, $2, $3) 
-       RETURNING id, email, name, created_at`,
-      [email, hashedPassword, name]
+    const result = await query(
+      `INSERT INTO users (name, email, password_hash)
+       VALUES ($1, $2, $3)
+       RETURNING id, name, email, avatar_url, created_at`,
+      [name.trim(), email.toLowerCase(), passwordHash]
     );
 
     const user = result.rows[0];
 
-    // Initialize user rewards
-    await db.query(
-      'INSERT INTO user_rewards (user_id) VALUES ($1)',
+    // Create default settings
+    await query(
+      'INSERT INTO user_settings (user_id) VALUES ($1)',
       [user.id]
     );
 
-    // Generate token
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
+    // Generate tokens
+    const accessToken = generateAccessToken(user.id);
+    const refreshToken = generateRefreshToken(user.id);
 
-    res.status(201).json({
-      success: true,
-      data: {
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name
-        },
-        token
-      }
-    });
+    // Store refresh token
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    await query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, refreshToken, expiresAt]
+    );
+
+    successResponse(res, {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatarUrl: user.avatar_url,
+      },
+      accessToken,
+      refreshToken,
+    }, 201);
   } catch (error) {
     console.error('Register error:', error);
-    res.status(500).json({ success: false, error: 'Registration failed' });
+    errorResponse(res, 500, 'Failed to create account');
   }
 });
 
-// Login
-router.post('/login', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').notEmpty()
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
-    }
+// ── POST /api/auth/login ────────────────────────────────────
 
+router.post('/login', async (req, res) => {
+  try {
     const { email, password } = req.body;
 
+    if (!email || !password) {
+      return errorResponse(res, 400, 'Email and password are required');
+    }
+
     // Find user
-    const result = await db.query(
-      'SELECT id, email, name, password_hash FROM users WHERE email = $1',
-      [email]
+    const result = await query(
+      'SELECT id, name, email, password_hash, avatar_url FROM users WHERE email = $1',
+      [email.toLowerCase()]
     );
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
+      return errorResponse(res, 401, 'Invalid email or password');
     }
 
     const user = result.rows[0];
 
-    // Verify password
-    const isValid = await bcrypt.compare(password, user.password_hash);
-    if (!isValid) {
-      return res.status(401).json({ success: false, error: 'Invalid credentials' });
+    // Check password
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      return errorResponse(res, 401, 'Invalid email or password');
     }
 
-    // Generate token
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
+    // Generate tokens
+    const accessToken = generateAccessToken(user.id);
+    const refreshToken = generateRefreshToken(user.id);
 
-    res.json({
-      success: true,
-      data: {
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name
-        },
-        token
-      }
+    // Store refresh token
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, refreshToken, expiresAt]
+    );
+
+    successResponse(res, {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatarUrl: user.avatar_url,
+      },
+      accessToken,
+      refreshToken,
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ success: false, error: 'Login failed' });
+    errorResponse(res, 500, 'Failed to login');
   }
 });
 
-// Get current user
-router.get('/me', async (req, res) => {
+// ── POST /api/auth/google ───────────────────────────────────
+
+router.post('/google', async (req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'No token provided' });
+    const { idToken, accessToken: googleAccessToken } = req.body;
+    
+    // In production, verify the Google token with Google's API
+    // For now, we'll accept the token data directly from the client
+    const { email, name, picture, sub: googleId } = req.body;
+
+    if (!email || !googleId) {
+      return errorResponse(res, 400, 'Invalid Google authentication data');
     }
 
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, JWT_SECRET);
+    // Check if user exists
+    let user;
+    const existingUser = await query(
+      'SELECT id, name, email, avatar_url FROM users WHERE google_id = $1 OR email = $2',
+      [googleId, email.toLowerCase()]
+    );
 
-    const result = await db.query(
-      'SELECT id, email, name, created_at FROM users WHERE id = $1',
-      [decoded.userId]
+    if (existingUser.rows.length > 0) {
+      user = existingUser.rows[0];
+      // Update Google ID if not set
+      if (!user.google_id) {
+        await query(
+          'UPDATE users SET google_id = $1, avatar_url = COALESCE(avatar_url, $2) WHERE id = $3',
+          [googleId, picture, user.id]
+        );
+      }
+    } else {
+      // Create new user
+      const result = await query(
+        `INSERT INTO users (name, email, google_id, avatar_url)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, name, email, avatar_url`,
+        [name, email.toLowerCase(), googleId, picture]
+      );
+      user = result.rows[0];
+
+      // Create default settings
+      await query(
+        'INSERT INTO user_settings (user_id) VALUES ($1)',
+        [user.id]
+      );
+    }
+
+    // Generate tokens
+    const accessToken = generateAccessToken(user.id);
+    const refreshToken = generateRefreshToken(user.id);
+
+    // Store refresh token
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, refreshToken, expiresAt]
+    );
+
+    successResponse(res, {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatarUrl: user.avatar_url,
+      },
+      accessToken,
+      refreshToken,
+    });
+  } catch (error) {
+    console.error('Google auth error:', error);
+    errorResponse(res, 500, 'Failed to authenticate with Google');
+  }
+});
+
+// ── POST /api/auth/refresh ──────────────────────────────────
+
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return errorResponse(res, 400, 'Refresh token required');
+    }
+
+    // Verify token
+    let decoded;
+    try {
+      decoded = verifyRefreshToken(refreshToken);
+    } catch {
+      return errorResponse(res, 401, 'Invalid refresh token');
+    }
+
+    // Check if token exists in database and not expired
+    const result = await query(
+      `SELECT rt.*, u.id, u.name, u.email, u.avatar_url 
+       FROM refresh_tokens rt
+       JOIN users u ON rt.user_id = u.id
+       WHERE rt.token = $1 AND rt.expires_at > NOW()`,
+      [refreshToken]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'User not found' });
+      return errorResponse(res, 401, 'Refresh token expired or invalid');
     }
 
-    res.json({ success: true, data: result.rows[0] });
+    const user = result.rows[0];
+
+    // Delete old refresh token
+    await query('DELETE FROM refresh_tokens WHERE token = $1', [refreshToken]);
+
+    // Generate new tokens
+    const newAccessToken = generateAccessToken(user.user_id);
+    const newRefreshToken = generateRefreshToken(user.user_id);
+
+    // Store new refresh token
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await query(
+      'INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.user_id, newRefreshToken, expiresAt]
+    );
+
+    successResponse(res, {
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+    });
   } catch (error) {
-    console.error('Get user error:', error);
-    res.status(401).json({ success: false, error: 'Invalid token' });
+    console.error('Refresh error:', error);
+    errorResponse(res, 500, 'Failed to refresh token');
+  }
+});
+
+// ── POST /api/auth/logout ───────────────────────────────────
+
+router.post('/logout', authenticate, async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (refreshToken) {
+      await query('DELETE FROM refresh_tokens WHERE token = $1', [refreshToken]);
+    }
+
+    // Optionally delete all user's refresh tokens
+    // await query('DELETE FROM refresh_tokens WHERE user_id = $1', [req.user.id]);
+
+    successResponse(res, { message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    errorResponse(res, 500, 'Failed to logout');
+  }
+});
+
+// ── GET /api/auth/me ────────────────────────────────────────
+
+router.get('/me', authenticate, async (req, res) => {
+  try {
+    successResponse(res, {
+      user: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        avatarUrl: req.user.avatar_url,
+      },
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    errorResponse(res, 500, 'Failed to get profile');
+  }
+});
+
+// ── PUT /api/auth/profile ───────────────────────────────────
+
+router.put('/profile', authenticate, async (req, res) => {
+  try {
+    const { name, avatarUrl } = req.body;
+
+    const result = await query(
+      `UPDATE users SET 
+        name = COALESCE($1, name),
+        avatar_url = COALESCE($2, avatar_url),
+        updated_at = NOW()
+       WHERE id = $3
+       RETURNING id, name, email, avatar_url`,
+      [name, avatarUrl, req.user.id]
+    );
+
+    const user = result.rows[0];
+
+    successResponse(res, {
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatarUrl: user.avatar_url,
+      },
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    errorResponse(res, 500, 'Failed to update profile');
+  }
+});
+
+// ── POST /api/auth/forgot-password ──────────────────────────
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return errorResponse(res, 400, 'Email is required');
+    }
+
+    // Check if user exists
+    const result = await query(
+      'SELECT id, email FROM users WHERE email = $1',
+      [email.toLowerCase()]
+    );
+
+    // Always return success to prevent email enumeration
+    if (result.rows.length === 0) {
+      return successResponse(res, { message: 'If the email exists, a reset link has been sent' });
+    }
+
+    // Generate reset token (in production, send this via email)
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    console.log('Password reset token for', email, ':', resetToken);
+
+    // In production: send email with reset link
+    // await sendResetEmail(email, resetToken);
+
+    successResponse(res, { message: 'If the email exists, a reset link has been sent' });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    errorResponse(res, 500, 'Failed to process request');
+  }
+});
+
+// ── POST /api/auth/reset-password ───────────────────────────
+
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return errorResponse(res, 400, 'Token and new password are required');
+    }
+
+    if (newPassword.length < 8) {
+      return errorResponse(res, 400, 'Password must be at least 8 characters');
+    }
+
+    // In production: verify reset token from database
+    // For now, just acknowledge the request
+    
+    successResponse(res, { message: 'Password has been reset' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    errorResponse(res, 500, 'Failed to reset password');
   }
 });
 

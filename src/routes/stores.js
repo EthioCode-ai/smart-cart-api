@@ -1,357 +1,337 @@
+// src/routes/stores.js
+// ============================================================
+// Stores Routes
+// ============================================================
+
 const express = require('express');
-const { body, query, validationResult } = require('express-validator');
-const db = require('../db');
+const { query, successResponse, errorResponse } = require('../models/db');
+const { authenticate, optionalAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Get nearby stores
-router.get('/nearby', [
-  query('latitude').isFloat({ min: -90, max: 90 }),
-  query('longitude').isFloat({ min: -180, max: 180 }),
-  query('radius').optional().isFloat({ min: 0.1, max: 100 }),
-  query('limit').optional().isInt({ min: 1, max: 50 })
-], async (req, res) => {
+// ── Helper: Format store response ───────────────────────────
+
+const formatStore = (row, isFavorite = false) => ({
+  id: row.id,
+  name: row.name,
+  address: row.address,
+  latitude: parseFloat(row.latitude),
+  longitude: parseFloat(row.longitude),
+  phone: row.phone,
+  hours: row.hours,
+  rating: parseFloat(row.rating) || 0,
+  photoReference: row.photo_reference,
+  googlePlaceId: row.google_place_id,
+  features: row.features || [],
+  services: row.services || [],
+  isOpen: row.is_open,
+  isFavorite: isFavorite || row.is_favorite || false,
+  favoriteNote: row.favorite_note,
+});
+
+// ── GET /api/stores/nearby ──────────────────────────────────
+
+router.get('/nearby', optionalAuth, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
+    const { lat, lng, radius = 10 } = req.query;
+
+    if (!lat || !lng) {
+      return errorResponse(res, 400, 'Latitude and longitude are required');
     }
 
-    const { latitude, longitude, radius = 10, limit = 20 } = req.query;
+    const latitude = parseFloat(lat);
+    const longitude = parseFloat(lng);
+    const radiusKm = parseFloat(radius);
 
-    const result = await db.query(
-      `SELECT 
-        id, name, chain, 
-        address_line1, address_line2, city, state, zip_code, country,
-        latitude, longitude,
-        phone, website, hours, features,
-        store_size_sqft, parking_spaces, has_gas_station, has_pharmacy,
-        has_optical, has_auto_center, num_checkout_lanes, num_self_checkout,
-        is_mapped, mapping_coverage_percent, total_contributions,
-        calculate_distance($1, $2, latitude, longitude) as distance_miles
-      FROM stores
-      WHERE is_active = true
-      AND calculate_distance($1, $2, latitude, longitude) <= $3
-      ORDER BY distance_miles
-      LIMIT $4`,
-      [latitude, longitude, radius, limit]
+    // Haversine formula for distance calculation
+    const result = await query(
+      `SELECT s.*,
+        (6371 * acos(cos(radians($1)) * cos(radians(latitude)) * 
+         cos(radians(longitude) - radians($2)) + 
+         sin(radians($1)) * sin(radians(latitude)))) AS distance,
+        CASE WHEN fs.id IS NOT NULL THEN true ELSE false END as is_favorite,
+        fs.description as favorite_note
+       FROM stores s
+       LEFT JOIN favorite_stores fs ON s.id = fs.store_id AND fs.user_id = $4
+       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+       HAVING (6371 * acos(cos(radians($1)) * cos(radians(latitude)) * 
+               cos(radians(longitude) - radians($2)) + 
+               sin(radians($1)) * sin(radians(latitude)))) < $3
+       ORDER BY distance
+       LIMIT 50`,
+      [latitude, longitude, radiusKm, req.user?.id || null]
     );
 
-    const stores = result.rows.map(store => ({
-      id: store.id,
-      name: store.name,
-      chain: store.chain,
-      address: {
-        addressLine1: store.address_line1,
-        addressLine2: store.address_line2,
-        city: store.city,
-        state: store.state,
-        zipCode: store.zip_code,
-        country: store.country
-      },
-      location: {
-        latitude: parseFloat(store.latitude),
-        longitude: parseFloat(store.longitude)
-      },
-      distanceMiles: parseFloat(store.distance_miles).toFixed(1),
-      phone: store.phone,
-      website: store.website,
-      hours: store.hours,
-      features: store.features || [],
-      physicalAttributes: {
-        storeSizeSqft: store.store_size_sqft,
-        parkingSpaces: store.parking_spaces,
-        hasGasStation: store.has_gas_station,
-        hasPharmacy: store.has_pharmacy,
-        hasOptical: store.has_optical,
-        hasAutoCenter: store.has_auto_center,
-        numCheckoutLanes: store.num_checkout_lanes,
-        numSelfCheckout: store.num_self_checkout
-      },
-      isMapped: store.is_mapped,
-      mappingCoveragePercent: store.mapping_coverage_percent,
-      totalContributions: store.total_contributions
+    const stores = result.rows.map(row => ({
+      ...formatStore(row),
+      distance: Math.round(parseFloat(row.distance) * 100) / 100,
     }));
 
-    res.json({ success: true, data: stores });
+    successResponse(res, { stores });
   } catch (error) {
     console.error('Get nearby stores error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch stores' });
+    errorResponse(res, 500, 'Failed to fetch nearby stores');
   }
 });
 
-// Search stores
-router.get('/search', [
-  query('q').trim().notEmpty()
-], async (req, res) => {
+// ── GET /api/stores/search ──────────────────────────────────
+
+router.get('/search', optionalAuth, async (req, res) => {
   try {
-    const { q, latitude, longitude } = req.query;
+    const { q, lat, lng, limit = 20 } = req.query;
+
+    if (!q || q.trim().length < 2) {
+      return successResponse(res, { stores: [] });
+    }
 
     let queryText = `
-      SELECT 
-        id, name, chain, 
-        address_line1, city, state, zip_code,
-        latitude, longitude,
-        phone, features,
-        is_mapped, mapping_coverage_percent
+      SELECT s.*,
+        CASE WHEN fs.id IS NOT NULL THEN true ELSE false END as is_favorite,
+        fs.description as favorite_note
+      FROM stores s
+      LEFT JOIN favorite_stores fs ON s.id = fs.store_id AND fs.user_id = $1
+      WHERE s.name ILIKE $2 OR s.address ILIKE $2
     `;
+    const params = [req.user?.id || null, `%${q}%`];
 
-    const params = [`%${q}%`];
-
-    if (latitude && longitude) {
-      queryText += `, calculate_distance($2, $3, latitude, longitude) as distance_miles`;
-      params.push(latitude, longitude);
-    }
-
-    queryText += `
-      FROM stores
-      WHERE is_active = true
-      AND (
-        name ILIKE $1 
-        OR chain ILIKE $1 
-        OR city ILIKE $1
-        OR address_line1 ILIKE $1
-      )
-    `;
-
-    if (latitude && longitude) {
-      queryText += ` ORDER BY distance_miles`;
+    if (lat && lng) {
+      queryText += `
+        ORDER BY (6371 * acos(cos(radians($3)) * cos(radians(latitude)) * 
+                  cos(radians(longitude) - radians($4)) + 
+                  sin(radians($3)) * sin(radians(latitude))))
+      `;
+      params.push(parseFloat(lat), parseFloat(lng));
     } else {
-      queryText += ` ORDER BY name`;
+      queryText += ' ORDER BY s.rating DESC NULLS LAST';
     }
 
-    queryText += ` LIMIT 20`;
+    queryText += ` LIMIT $${params.length + 1}`;
+    params.push(parseInt(limit));
 
-    const result = await db.query(queryText, params);
+    const result = await query(queryText, params);
 
-    const stores = result.rows.map(store => ({
-      id: store.id,
-      name: store.name,
-      chain: store.chain,
-      address: {
-        addressLine1: store.address_line1,
-        city: store.city,
-        state: store.state,
-        zipCode: store.zip_code
-      },
-      location: {
-        latitude: parseFloat(store.latitude),
-        longitude: parseFloat(store.longitude)
-      },
-      distanceMiles: store.distance_miles ? parseFloat(store.distance_miles).toFixed(1) : null,
-      phone: store.phone,
-      features: store.features || [],
-      isMapped: store.is_mapped,
-      mappingCoveragePercent: store.mapping_coverage_percent
-    }));
-
-    res.json({ success: true, data: stores });
+    successResponse(res, { stores: result.rows.map(row => formatStore(row)) });
   } catch (error) {
     console.error('Search stores error:', error);
-    res.status(500).json({ success: false, error: 'Search failed' });
+    errorResponse(res, 500, 'Failed to search stores');
   }
 });
 
-// Get store by ID
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
+// ── GET /api/stores/favorites ───────────────────────────────
 
-    const result = await db.query(
-      `SELECT 
-        id, name, chain, 
-        address_line1, address_line2, city, state, zip_code, country,
-        latitude, longitude,
-        phone, website, hours, features,
-        store_size_sqft, parking_spaces, has_gas_station, has_pharmacy,
-        has_optical, has_auto_center, num_checkout_lanes, num_self_checkout,
-        is_mapped, mapping_coverage_percent, total_contributions,
-        created_at, updated_at
-      FROM stores
-      WHERE id = $1 AND is_active = true`,
-      [id]
+router.get('/favorites', authenticate, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT s.*, true as is_favorite, fs.description as favorite_note
+       FROM stores s
+       JOIN favorite_stores fs ON s.id = fs.store_id
+       WHERE fs.user_id = $1
+       ORDER BY fs.created_at DESC`,
+      [req.user.id]
+    );
+
+    successResponse(res, { stores: result.rows.map(row => formatStore(row, true)) });
+  } catch (error) {
+    console.error('Get favorite stores error:', error);
+    errorResponse(res, 500, 'Failed to fetch favorite stores');
+  }
+});
+
+// ── GET /api/stores/:id ─────────────────────────────────────
+
+router.get('/:id', optionalAuth, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT s.*,
+        CASE WHEN fs.id IS NOT NULL THEN true ELSE false END as is_favorite,
+        fs.description as favorite_note
+       FROM stores s
+       LEFT JOIN favorite_stores fs ON s.id = fs.store_id AND fs.user_id = $2
+       WHERE s.id = $1`,
+      [req.params.id, req.user?.id || null]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Store not found' });
+      return errorResponse(res, 404, 'Store not found');
     }
 
-    const store = result.rows[0];
-
-    res.json({
-      success: true,
-      data: {
-        id: store.id,
-        name: store.name,
-        chain: store.chain,
-        address: {
-          addressLine1: store.address_line1,
-          addressLine2: store.address_line2,
-          city: store.city,
-          state: store.state,
-          zipCode: store.zip_code,
-          country: store.country
-        },
-        location: {
-          latitude: parseFloat(store.latitude),
-          longitude: parseFloat(store.longitude)
-        },
-        phone: store.phone,
-        website: store.website,
-        hours: store.hours,
-        features: store.features || [],
-        physicalAttributes: {
-          storeSizeSqft: store.store_size_sqft,
-          parkingSpaces: store.parking_spaces,
-          hasGasStation: store.has_gas_station,
-          hasPharmacy: store.has_pharmacy,
-          hasOptical: store.has_optical,
-          hasAutoCenter: store.has_auto_center,
-          numCheckoutLanes: store.num_checkout_lanes,
-          numSelfCheckout: store.num_self_checkout
-        },
-        isMapped: store.is_mapped,
-        mappingCoveragePercent: store.mapping_coverage_percent,
-        totalContributions: store.total_contributions,
-        createdAt: store.created_at,
-        updatedAt: store.updated_at
-      }
-    });
+    successResponse(res, { store: formatStore(result.rows[0]) });
   } catch (error) {
     console.error('Get store error:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch store' });
+    errorResponse(res, 500, 'Failed to fetch store');
   }
 });
 
-// Pin a new store
-router.post('/pin', [
-  body('name').trim().notEmpty(),
-  body('address.addressLine1').trim().notEmpty(),
-  body('address.city').trim().notEmpty(),
-  body('address.state').trim().notEmpty(),
-  body('address.zipCode').trim().notEmpty(),
-  body('location.latitude').isFloat({ min: -90, max: 90 }),
-  body('location.longitude').isFloat({ min: -180, max: 180 })
-], async (req, res) => {
+// ── GET /api/stores/:id/features ────────────────────────────
+
+router.get('/:id/features', async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, errors: errors.array() });
-    }
-
-    const { name, chain, address, location, phone, features, physicalAttributes } = req.body;
-
-    // Check for duplicate (same location within ~50 meters)
-    const duplicateCheck = await db.query(
-      `SELECT id, name FROM stores 
-       WHERE calculate_distance($1, $2, latitude, longitude) < 0.03
-       AND is_active = true`,
-      [location.latitude, location.longitude]
+    const result = await query(
+      'SELECT features, services FROM stores WHERE id = $1',
+      [req.params.id]
     );
 
-    if (duplicateCheck.rows.length > 0) {
-      return res.status(400).json({
-        success: false,
-        error: `A store already exists at this location: ${duplicateCheck.rows[0].name}`
+    if (result.rows.length === 0) {
+      return errorResponse(res, 404, 'Store not found');
+    }
+
+    successResponse(res, {
+      features: result.rows[0].features || [],
+      services: result.rows[0].services || [],
+    });
+  } catch (error) {
+    console.error('Get store features error:', error);
+    errorResponse(res, 500, 'Failed to fetch store features');
+  }
+});
+
+// ── GET /api/stores/:id/layout ──────────────────────────────
+
+router.get('/:id/layout', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT sl.* FROM store_layout sl
+       WHERE sl.store_id = $1`,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      // Return empty layout if none exists
+      return successResponse(res, {
+        layout: {
+          aisles: [],
+          sections: [],
+          pointsOfInterest: [],
+        },
       });
     }
 
-    const result = await db.query(
-      `INSERT INTO stores (
-        name, chain, 
-        address_line1, address_line2, city, state, zip_code, country,
-        latitude, longitude,
-        phone, features,
-        store_size_sqft, parking_spaces, has_gas_station, has_pharmacy,
-        has_optical, has_auto_center, num_checkout_lanes, num_self_checkout
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-      RETURNING id, name, created_at`,
-      [
-        name,
-        chain || null,
-        address.addressLine1,
-        address.addressLine2 || null,
-        address.city,
-        address.state,
-        address.zipCode,
-        address.country || 'USA',
-        location.latitude,
-        location.longitude,
-        phone || null,
-        features || [],
-        physicalAttributes?.storeSizeSqft || null,
-        physicalAttributes?.parkingSpaces || null,
-        physicalAttributes?.hasGasStation || false,
-        physicalAttributes?.hasPharmacy || false,
-        physicalAttributes?.hasOptical || false,
-        physicalAttributes?.hasAutoCenter || false,
-        physicalAttributes?.numCheckoutLanes || null,
-        physicalAttributes?.numSelfCheckout || null
-      ]
-    );
+    const layout = result.rows[0];
 
-    const newStore = result.rows[0];
-
-    res.status(201).json({
-      success: true,
-      data: {
-        id: newStore.id,
-        name: newStore.name,
-        chain,
-        address,
-        location,
-        phone,
-        features: features || [],
-        isMapped: false,
-        mappingCoveragePercent: 0,
-        createdAt: newStore.created_at
+    successResponse(res, {
+      layout: {
+        aisles: layout.aisles || [],
+        sections: layout.sections || [],
+        pointsOfInterest: layout.points_of_interest || [],
+        updatedAt: layout.updated_at,
       },
-      message: 'Store pinned successfully! You can now contribute its layout.'
     });
   } catch (error) {
-    console.error('Pin store error:', error);
-    res.status(500).json({ success: false, error: 'Failed to pin store' });
+    console.error('Get store layout error:', error);
+    errorResponse(res, 500, 'Failed to fetch store layout');
   }
 });
 
-// Update store attributes
-router.patch('/:id/attributes', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const {
-      storeSizeSqft, parkingSpaces, hasGasStation, hasPharmacy,
-      hasOptical, hasAutoCenter, numCheckoutLanes, numSelfCheckout
-    } = req.body;
+// ── GET /api/stores/:id/contributions ───────────────────────
 
-    const result = await db.query(
-      `UPDATE stores SET
-        store_size_sqft = COALESCE($2, store_size_sqft),
-        parking_spaces = COALESCE($3, parking_spaces),
-        has_gas_station = COALESCE($4, has_gas_station),
-        has_pharmacy = COALESCE($5, has_pharmacy),
-        has_optical = COALESCE($6, has_optical),
-        has_auto_center = COALESCE($7, has_auto_center),
-        num_checkout_lanes = COALESCE($8, num_checkout_lanes),
-        num_self_checkout = COALESCE($9, num_self_checkout),
-        updated_at = NOW()
-      WHERE id = $1
-      RETURNING id, name`,
-      [id, storeSizeSqft, parkingSpaces, hasGasStation, hasPharmacy,
-       hasOptical, hasAutoCenter, numCheckoutLanes, numSelfCheckout]
+router.get('/:id/contributions', async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT sc.*, u.name as contributor_name
+       FROM store_contributions sc
+       JOIN users u ON sc.user_id = u.id
+       WHERE sc.store_id = $1 AND sc.status = 'approved'
+       ORDER BY sc.created_at DESC
+       LIMIT 10`,
+      [req.params.id]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'Store not found' });
+    const contributions = result.rows.map(row => ({
+      id: row.id,
+      videoUrl: row.video_url,
+      layoutData: row.layout_data,
+      status: row.status,
+      contributorName: row.contributor_name,
+      createdAt: row.created_at,
+    }));
+
+    successResponse(res, { contributions });
+  } catch (error) {
+    console.error('Get contributions error:', error);
+    errorResponse(res, 500, 'Failed to fetch contributions');
+  }
+});
+
+// ── POST /api/stores/:id/contributions ──────────────────────
+
+router.post('/:id/contributions', authenticate, async (req, res) => {
+  try {
+    const { videoUrl, layoutData } = req.body;
+
+    // Verify store exists
+    const storeCheck = await query(
+      'SELECT id FROM stores WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (storeCheck.rows.length === 0) {
+      return errorResponse(res, 404, 'Store not found');
     }
 
-    res.json({
-      success: true,
-      message: 'Store attributes updated',
-      data: result.rows[0]
-    });
+    const result = await query(
+      `INSERT INTO store_contributions (store_id, user_id, video_url, layout_data, status)
+       VALUES ($1, $2, $3, $4, 'processing')
+       RETURNING *`,
+      [req.params.id, req.user.id, videoUrl, JSON.stringify(layoutData)]
+    );
+
+    successResponse(res, {
+      contribution: {
+        id: result.rows[0].id,
+        status: result.rows[0].status,
+        message: 'Contribution submitted for processing',
+      },
+    }, 201);
   } catch (error) {
-    console.error('Update store attributes error:', error);
-    res.status(500).json({ success: false, error: 'Failed to update store' });
+    console.error('Submit contribution error:', error);
+    errorResponse(res, 500, 'Failed to submit contribution');
+  }
+});
+
+// ── POST /api/stores/:id/favorite ───────────────────────────
+
+router.post('/:id/favorite', authenticate, async (req, res) => {
+  try {
+    const { description } = req.body;
+
+    // Verify store exists
+    const storeCheck = await query(
+      'SELECT id FROM stores WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (storeCheck.rows.length === 0) {
+      return errorResponse(res, 404, 'Store not found');
+    }
+
+    await query(
+      `INSERT INTO favorite_stores (user_id, store_id, description)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, store_id) 
+       DO UPDATE SET description = COALESCE($3, favorite_stores.description)`,
+      [req.user.id, req.params.id, description]
+    );
+
+    successResponse(res, { message: 'Store added to favorites' });
+  } catch (error) {
+    console.error('Add favorite store error:', error);
+    errorResponse(res, 500, 'Failed to add favorite store');
+  }
+});
+
+// ── DELETE /api/stores/:id/favorite ─────────────────────────
+
+router.delete('/:id/favorite', authenticate, async (req, res) => {
+  try {
+    await query(
+      'DELETE FROM favorite_stores WHERE user_id = $1 AND store_id = $2',
+      [req.user.id, req.params.id]
+    );
+
+    successResponse(res, { message: 'Store removed from favorites' });
+  } catch (error) {
+    console.error('Remove favorite store error:', error);
+    errorResponse(res, 500, 'Failed to remove favorite store');
   }
 });
 
