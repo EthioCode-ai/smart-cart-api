@@ -470,4 +470,178 @@ router.post('/recognize-image', async (req, res) => {
   }
 });
 
+// ── POST /api/ai/generate-list ─────────────────────────────────────
+router.post('/generate-list', async (req, res) => {
+  try {
+    const { prompt } = req.body;
+
+    if (!prompt) {
+      return errorResponse(res, 400, 'Prompt is required');
+    }
+
+    const context = await getUserContext(req.user.id);
+
+    // Check for recipe-related keywords
+    const recipeKeywords = ['recipe', 'cook', 'make', 'prepare', 'dish', 'meal', 'ingredients'];
+    const isRecipeRequest = recipeKeywords.some(kw => prompt.toLowerCase().includes(kw));
+
+    if (!openai) {
+      // Fallback suggestions based on keywords
+      const suggestions = generateFallbackSuggestions(prompt);
+      return successResponse(res, {
+        suggestions,
+        recipes: [],
+        message: `Here are shopping suggestions for: "${prompt}"`,
+      });
+    }
+
+    const systemPrompt = `You are Smart Cart, an AI shopping assistant and culinary expert.
+Based on the user's request, generate a shopping list with items they'll need.
+
+User's dietary restrictions: ${context.dietaryRestrictions.join(', ') || 'None'}
+User's allergens to AVOID: ${context.allergens.join(', ') || 'None'}
+
+IMPORTANT: Never suggest items containing the user's allergens.
+
+Respond ONLY with valid JSON in this exact format:
+{
+  "suggestions": [
+    {"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|household", "reason": "why needed", "price": 0.00}
+  ],
+  "recipes": [
+    {"title": "Recipe Name", "description": "Brief description", "prepTime": 30, "servings": 4, "difficulty": "Easy|Medium|Hard", "ingredients": ["item 1", "item 2"], "instructions": ["Step 1", "Step 2"]}
+  ],
+  "message": "Friendly summary message"
+}
+
+${isRecipeRequest ? 'Include 1-2 relevant recipes.' : 'No recipes needed, just shopping items.'}
+Estimate realistic prices in USD.`;
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4-turbo-preview',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 1500,
+      temperature: 0.7,
+    });
+
+    let result;
+    try {
+      const content = completion.choices[0].message.content;
+      // Clean up potential markdown formatting
+      const jsonStr = content.replace(/```json\n?|\n?```/g, '').trim();
+      result = JSON.parse(jsonStr);
+    } catch (parseError) {
+      console.error('Failed to parse AI response:', parseError);
+      // Return fallback on parse error
+      const suggestions = generateFallbackSuggestions(prompt);
+      return successResponse(res, {
+        suggestions,
+        recipes: [],
+        message: `Here are shopping suggestions for: "${prompt}"`,
+      });
+    }
+
+    successResponse(res, {
+      suggestions: result.suggestions || [],
+      recipes: result.recipes || [],
+      message: result.message || 'Here are your shopping suggestions!',
+    });
+  } catch (error) {
+    console.error('Generate list error:', error);
+    // Return fallback on any error
+    const suggestions = generateFallbackSuggestions(req.body.prompt || '');
+    successResponse(res, {
+      suggestions,
+      recipes: [],
+      message: 'Here are some suggestions based on your request.',
+    });
+  }
+});
+
+// Helper function for fallback suggestions
+function generateFallbackSuggestions(prompt) {
+  const lower = prompt.toLowerCase();
+  
+  if (lower.includes('steak') || lower.includes('beef')) {
+    return [
+      { item: 'ribeye steak', category: 'meat', reason: 'main protein for the meal', price: 15.99 },
+      { item: 'salt', category: 'pantry', reason: 'to season the steak', price: 1.99 },
+      { item: 'pepper', category: 'pantry', reason: 'for seasoning', price: 2.49 },
+      { item: 'olive oil', category: 'pantry', reason: 'for cooking', price: 8.99 },
+      { item: 'butter', category: 'dairy', reason: 'to baste the steak', price: 4.99 },
+      { item: 'garlic', category: 'produce', reason: 'adds flavor when basting', price: 0.99 },
+      { item: 'thyme', category: 'produce', reason: 'adds aroma and flavor', price: 2.99 },
+      { item: 'potatoes', category: 'produce', reason: 'classic side dish', price: 3.99 },
+      { item: 'asparagus', category: 'produce', reason: 'vegetable side dish', price: 4.49 },
+    ];
+  } else if (lower.includes('pasta') || lower.includes('spaghetti') || lower.includes('bolognese')) {
+    return [
+      { item: 'spaghetti', category: 'pantry', reason: 'base pasta for the dish', price: 1.99 },
+      { item: 'ground beef', category: 'meat', reason: 'main protein for the sauce', price: 7.99 },
+      { item: 'onion', category: 'produce', reason: 'adds flavor and aroma', price: 0.99 },
+      { item: 'garlic', category: 'produce', reason: 'enhances the flavor', price: 0.99 },
+      { item: 'carrot', category: 'produce', reason: 'adds sweetness to sauce', price: 1.49 },
+      { item: 'celery', category: 'produce', reason: 'adds depth of flavor', price: 1.99 },
+      { item: 'canned tomatoes', category: 'pantry', reason: 'base of the sauce', price: 2.49 },
+      { item: 'tomato paste', category: 'pantry', reason: 'thickens and enriches sauce', price: 1.29 },
+      { item: 'parmesan cheese', category: 'dairy', reason: 'for topping', price: 6.99 },
+    ];
+  } else if (lower.includes('taco') || lower.includes('mexican')) {
+    return [
+      { item: 'ground beef', category: 'meat', reason: 'taco filling base', price: 7.99 },
+      { item: 'taco shells', category: 'bakery', reason: 'to hold the filling', price: 3.49 },
+      { item: 'lettuce', category: 'produce', reason: 'fresh topping', price: 1.99 },
+      { item: 'tomatoes', category: 'produce', reason: 'diced for topping', price: 2.49 },
+      { item: 'cheese', category: 'dairy', reason: 'shredded for topping', price: 4.99 },
+      { item: 'sour cream', category: 'dairy', reason: 'creamy topping', price: 2.99 },
+      { item: 'taco seasoning', category: 'pantry', reason: 'flavors the meat', price: 1.49 },
+      { item: 'onion', category: 'produce', reason: 'adds crunch and flavor', price: 0.99 },
+    ];
+  } else if (lower.includes('chicken')) {
+    return [
+      { item: 'chicken breast', category: 'meat', reason: 'main protein', price: 8.99 },
+      { item: 'olive oil', category: 'pantry', reason: 'for cooking', price: 8.99 },
+      { item: 'garlic', category: 'produce', reason: 'adds flavor', price: 0.99 },
+      { item: 'lemon', category: 'produce', reason: 'for brightness', price: 0.79 },
+      { item: 'rosemary', category: 'produce', reason: 'aromatic herb', price: 2.99 },
+      { item: 'salt', category: 'pantry', reason: 'for seasoning', price: 1.99 },
+      { item: 'pepper', category: 'pantry', reason: 'for seasoning', price: 2.49 },
+    ];
+  } else if (lower.includes('breakfast') || lower.includes('egg')) {
+    return [
+      { item: 'eggs', category: 'dairy', reason: 'breakfast protein', price: 4.99 },
+      { item: 'bacon', category: 'meat', reason: 'classic breakfast side', price: 6.99 },
+      { item: 'bread', category: 'bakery', reason: 'for toast', price: 3.49 },
+      { item: 'butter', category: 'dairy', reason: 'for cooking and toast', price: 4.99 },
+      { item: 'orange juice', category: 'beverages', reason: 'breakfast drink', price: 4.49 },
+      { item: 'milk', category: 'dairy', reason: 'for coffee or cereal', price: 3.99 },
+    ];
+  } else if (lower.includes('salad') || lower.includes('healthy')) {
+    return [
+      { item: 'mixed greens', category: 'produce', reason: 'salad base', price: 4.99 },
+      { item: 'cherry tomatoes', category: 'produce', reason: 'adds color and flavor', price: 3.99 },
+      { item: 'cucumber', category: 'produce', reason: 'refreshing crunch', price: 1.49 },
+      { item: 'avocado', category: 'produce', reason: 'healthy fats', price: 2.49 },
+      { item: 'olive oil', category: 'pantry', reason: 'for dressing', price: 8.99 },
+      { item: 'lemon', category: 'produce', reason: 'for dressing', price: 0.79 },
+      { item: 'feta cheese', category: 'dairy', reason: 'adds protein and flavor', price: 5.99 },
+    ];
+  } else {
+    // Generic suggestions
+    return [
+      { item: 'chicken breast', category: 'meat', reason: 'versatile protein', price: 8.99 },
+      { item: 'rice', category: 'pantry', reason: 'staple grain', price: 3.99 },
+      { item: 'broccoli', category: 'produce', reason: 'healthy vegetable', price: 2.99 },
+      { item: 'olive oil', category: 'pantry', reason: 'for cooking', price: 8.99 },
+      { item: 'garlic', category: 'produce', reason: 'adds flavor', price: 0.99 },
+      { item: 'onion', category: 'produce', reason: 'base for many dishes', price: 0.99 },
+      { item: 'salt', category: 'pantry', reason: 'essential seasoning', price: 1.99 },
+      { item: 'pepper', category: 'pantry', reason: 'essential seasoning', price: 2.49 },
+    ];
+  }
+}
+
 module.exports = router;
