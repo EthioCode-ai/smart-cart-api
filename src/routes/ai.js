@@ -470,7 +470,7 @@ router.post('/recognize-image', async (req, res) => {
   }
 });
 
-// ── POST /api/ai/generate-list ─────────────────────────────────────
+// ── POST /api/ai/generate-list ───────────────────────────────────────────────
 router.post('/generate-list', async (req, res) => {
   try {
     const { prompt } = req.body;
@@ -481,9 +481,13 @@ router.post('/generate-list', async (req, res) => {
 
     const context = await getUserContext(req.user.id);
 
-    // Check for recipe-related keywords
-    const recipeKeywords = ['recipe', 'cook', 'make', 'prepare', 'dish', 'meal', 'ingredients'];
-    const isRecipeRequest = recipeKeywords.some(kw => prompt.toLowerCase().includes(kw));
+    // ── Mode Detection ──
+    const lower = prompt.toLowerCase();
+    const recipeKeywords = ['recipe', 'cook', 'make', 'prepare', 'dish', 'meal', 'ingredients', 'ingredient'];
+    const fullCourseKeywords = ['full course', 'full-course', 'complete dinner', 'complete meal', 'multi course', 'multi-course', 'appetizer and', 'three course', '3 course'];
+    
+    const isFullCourse = fullCourseKeywords.some(kw => lower.includes(kw));
+    const isRecipeRequest = !isFullCourse && recipeKeywords.some(kw => lower.includes(kw));
 
     if (!openai) {
       // Fallback suggestions based on keywords
@@ -495,47 +499,88 @@ router.post('/generate-list', async (req, res) => {
       });
     }
 
-    const systemPrompt = `You are Smart Cart, an AI shopping assistant and culinary expert.
-Based on the user's request, generate a shopping list with items they'll need.
+    // ── Build system prompt based on mode ──
+    let systemPrompt;
+    let userMessage = prompt;
 
-User's dietary restrictions: ${context.dietaryRestrictions.join(', ') || 'None'}
-User's allergens to AVOID: ${context.allergens.join(', ') || 'None'}
+    const dietaryNote = context.dietaryRestrictions.length 
+      ? `\nUser dietary restrictions: ${context.dietaryRestrictions.join(', ')}` 
+      : '';
+    const allergenNote = context.allergens.length 
+      ? `\nAllergens to AVOID (never suggest these): ${context.allergens.join(', ')}` 
+      : '';
 
-IMPORTANT: Never suggest items containing the user's allergens.
+    if (isFullCourse) {
+      // ── Mode 3: Full-Course Meal ──
+      systemPrompt = `You are an expert chef and meal planner. When asked for a full-course meal, provide a complete dining experience with multiple courses (appetizer, main course, side dishes, dessert).
+
+CRITICAL RULES:
+- The main ingredient or dish the user asks for MUST appear as the centerpiece of the meal.
+- Each course should have its own complete ingredient list with quantities and store categories.
+- Estimate realistic USD prices for each ingredient.${dietaryNote}${allergenNote}
 
 Respond ONLY with valid JSON in this exact format:
 {
-  "suggestions": [
-    {"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|household", "reason": "why needed", "price": 0.00}
-  ],
-  "recipes": [
-    {"title": "Recipe Name", "description": "Brief description", "prepTime": 30, "servings": 4, "difficulty": "Easy|Medium|Hard", "ingredients": ["item 1", "item 2"], "instructions": ["Step 1", "Step 2"]}
-  ],
-  "message": "Friendly summary message"
-}
+  "suggestions": [{"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|seafood|deli|household", "reason": "why needed", "price": 0.00}],
+  "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard"}],
+  "mealTheme": "Theme name",
+  "servings": 4,
+  "message": "Friendly summary"
+}`;
+    } else if (isRecipeRequest) {
+      // ── Mode 2: Shopping List + Recipes ──
+      systemPrompt = `You are a helpful shopping assistant and culinary expert. Generate shopping list items based on user requests AND provide recipe suggestions when appropriate.
 
-${isRecipeRequest ? 'Include 1-2 relevant recipes.' : 'No recipes needed, just shopping items.'}
-Estimate realistic prices in USD.`;
+CRITICAL RULES:
+- The MAIN ingredient or dish the user asks for MUST be the FIRST item in the suggestions list.
+- If the user says "steak dinner", the first suggestion MUST be steak. If they say "pasta", the first suggestion MUST be pasta.
+- Categorize items accurately: produce, dairy, meat, seafood, pantry, bakery, frozen, beverages, deli, household.
+- Estimate realistic USD prices.
+- Include 1-2 detailed recipes that use the suggested ingredients.${dietaryNote}${allergenNote}
+
+Respond ONLY with valid JSON:
+{
+  "suggestions": [{"item": "item name", "category": "meat", "reason": "main protein for the meal", "price": 15.99}],
+  "recipes": [{"title": "Recipe Name", "description": "Brief description", "prepTime": 30, "servings": 4, "difficulty": "Easy|Medium|Hard", "tags": ["dinner", "cuisine"], "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}], "instructions": ["Step 1...", "Step 2..."]}],
+  "message": "Friendly summary message"
+}`;
+      userMessage = prompt + '. Please include recipe suggestions with detailed instructions and ingredient lists.';
+    } else {
+      // ── Mode 1: Shopping List Only ──
+      systemPrompt = `You are a helpful shopping assistant. Generate shopping list items based on user requests.
+
+CRITICAL RULES:
+- The MAIN ingredient or dish the user asks for MUST be the FIRST item in the suggestions list.
+- If the user says "steak dinner for two", the first suggestion MUST be steak (e.g., ribeye, NY strip, filet mignon).
+- If the user says "chicken stir fry", the first suggestion MUST be chicken.
+- Never omit the primary item the user specifically requested.
+- Categorize items accurately: produce, dairy, meat, seafood, pantry, bakery, frozen, beverages, deli, household.
+- Estimate realistic USD prices.
+- Include complementary items (sides, seasonings, cooking essentials).${dietaryNote}${allergenNote}
+
+Respond ONLY with valid JSON:
+{
+  "suggestions": [{"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|seafood|deli|household", "reason": "brief reason", "price": 0.00}],
+  "message": "Friendly summary message"
+}`;
+    }
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt },
+        { role: 'user', content: userMessage },
       ],
+      response_format: { type: 'json_object' },
       max_tokens: 1500,
       temperature: 0.7,
     });
 
     let result;
     try {
-      const content = completion.choices[0].message.content;
-      // Clean up potential markdown formatting
-      const jsonStr = content.replace(/```json\n?|\n?```/g, '').trim();
-      result = JSON.parse(jsonStr);
+      result = JSON.parse(completion.choices[0].message.content);
     } catch (parseError) {
       console.error('Failed to parse AI response:', parseError);
-      // Return fallback on parse error
       const suggestions = generateFallbackSuggestions(prompt);
       return successResponse(res, {
         suggestions,
@@ -546,7 +591,7 @@ Estimate realistic prices in USD.`;
 
     successResponse(res, {
       suggestions: result.suggestions || [],
-      recipes: result.recipes || [],
+      recipes: result.recipes || result.courses || [],
       message: result.message || 'Here are your shopping suggestions!',
     });
   } catch (error) {
