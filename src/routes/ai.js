@@ -258,7 +258,10 @@ Respond in JSON format only:
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
-      messages: [{ role: 'user', content: prompt }],
+      messages: [
+        { role: 'system', content: 'You are an expert nutritionist and meal planner. Generate balanced, varied meal plans that meet the specified nutritional goals.' },
+        { role: 'user', content: prompt },
+      ],
       response_format: { type: 'json_object' },
       max_tokens: 2000,
     });
@@ -506,13 +509,9 @@ router.post('/generate-list', async (req, res) => {
 
     if (isFullCourse) {
       // ── Mode 3: Full-Course Meal ──
-      systemPrompt = `You are an expert chef and meal planner. When asked for a full-course meal, provide a complete dining experience with multiple courses (appetizer, main course, side dishes, dessert, and optional beverage). Each course should be a distinct dish with its own ingredients list.`;
+      systemPrompt = `You are an expert chef and meal planner. When asked for a full-course meal, provide a complete dining experience with multiple courses (appetizer, main course, side dishes, dessert, and optional beverage). Each course should be a distinct dish with its own ingredients list.
 
-      // Extract cuisine and servings from prompt if possible
-      const servingsMatch = lower.match(/for (\d+)/);
-      const servings = servingsMatch ? servingsMatch[1] : '4';
-
-      userMessage = `Create a delicious full-course dinner for ${servings} people based on: "${prompt}". Include appetizer, main course, side dish, and dessert. Provide complete ingredient lists for each course with quantities and categorization for shopping. Respond with JSON: { "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard"}], "mealTheme": "Theme name", "servings": ${servings}, "message": "Friendly summary" }`;
+Respond with JSON: { "suggestions": [{"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|seafood|deli|household", "reason": "why needed", "price": 0.00}], "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard"}], "mealTheme": "Theme name", "servings": 4, "message": "Friendly summary" }`;
 
     } else if (isRecipeRequest) {
       // ── Mode 2: Shopping List + Recipes ──
@@ -545,32 +544,19 @@ router.post('/generate-list', async (req, res) => {
       return errorResponse(res, 500, 'Failed to process AI response. Please try again.');
     }
 
-    // ── Generate DALL-E images for recipes (non-blocking) ──
+    // ── Generate DALL-E images for each recipe ──
     const recipes = result.recipes || result.courses || [];
     let recipesWithImages = recipes;
 
     if (recipes.length > 0) {
-      // Don't await DALL-E — return suggestions immediately, generate images in parallel
-      const imagePromises = recipes.map(async (recipe) => {
-        const title = recipe.title || recipe.dishName;
-        const description = recipe.description || '';
-        const imageUrl = await generateRecipeImage(title, description);
-        return { ...recipe, imageUrl };
-      });
-
-      // Wait for images but with a 5-second timeout — if DALL-E is slow, use defaults
-      try {
-        recipesWithImages = await Promise.race([
-          Promise.all(imagePromises),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
-        ]);
-      } catch (timeoutErr) {
-        // DALL-E took too long, use default images
-        recipesWithImages = recipes.map(recipe => ({
-          ...recipe,
-          imageUrl: DEFAULT_RECIPE_IMAGE,
-        }));
-      }
+      recipesWithImages = await Promise.all(
+        recipes.map(async (recipe) => {
+          const title = recipe.title || recipe.dishName;
+          const description = recipe.description || '';
+          const imageUrl = await generateRecipeImage(title, description);
+          return { ...recipe, imageUrl };
+        })
+      );
     }
 
     successResponse(res, {
