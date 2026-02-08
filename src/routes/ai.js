@@ -23,6 +23,25 @@ try {
   console.warn('OpenAI not configured. AI features will return mock data.');
 }
 
+// ── Helper: Generate recipe image with DALL-E ───────────────
+
+const generateRecipeImage = async (imagePrompt) => {
+  if (!openai || !imagePrompt) return null;
+  try {
+    const response = await openai.images.generate({
+      model: 'dall-e-3',
+      prompt: `Professional food photography of ${imagePrompt}. Overhead shot on a clean plate, soft natural lighting, appetizing presentation. No text or labels.`,
+      n: 1,
+      size: '1024x1024',
+      quality: 'standard',
+    });
+    return response.data[0]?.url || null;
+  } catch (error) {
+    console.error('DALL-E image generation error:', error.message);
+    return null;
+  }
+};
+
 // ── Helper: Get user context for AI ─────────────────────────
 
 const getUserContext = async (userId) => {
@@ -31,9 +50,9 @@ const getUserContext = async (userId) => {
       'SELECT dietary_restrictions, allergens FROM user_settings WHERE user_id = $1',
       [userId]
     );
-    
+
     const settings = settingsResult.rows[0] || {};
-    
+
     return {
       dietaryRestrictions: settings.dietary_restrictions || [],
       allergens: settings.allergens || [],
@@ -56,14 +75,13 @@ router.post('/chat', async (req, res) => {
     const context = await getUserContext(req.user.id);
 
     if (!openai) {
-      // Mock response if OpenAI not configured
       return successResponse(res, {
         response: `I'd be happy to help you with "${message}". As your shopping assistant, I can help you create lists, find recipes, and plan your meals. What would you like to do?`,
         suggestions: ['Create a shopping list', 'Find a recipe', 'Plan my meals'],
       });
     }
 
-    const systemPrompt = `You are Smart Cart, a helpful AI shopping assistant. 
+    const systemPrompt = `You are Smart Cart, a helpful AI shopping assistant.
 You help users with grocery shopping, meal planning, and recipe suggestions.
 
 User's dietary restrictions: ${context.dietaryRestrictions.join(', ') || 'None'}
@@ -82,7 +100,7 @@ When suggesting products, be specific with quantities.`;
     ];
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages,
       max_tokens: 500,
       temperature: 0.7,
@@ -109,7 +127,6 @@ router.post('/generate-recipe', async (req, res) => {
     const context = await getUserContext(req.user.id);
 
     if (!openai) {
-      // Mock recipe if OpenAI not configured
       return successResponse(res, {
         recipe: {
           title: 'Quick Pasta Primavera',
@@ -156,11 +173,12 @@ Respond in JSON format only:
   "servings": ${servings},
   "ingredients": [{"name": "ingredient", "quantity": "1", "unit": "cup"}],
   "instructions": [{"step": 1, "text": "instruction"}],
-  "nutrition": {"calories": 350, "protein": 20, "carbs": 45, "fat": 12}
+  "nutrition": {"calories": 350, "protein": 20, "carbs": 45, "fat": 12},
+  "imagePrompt": "a detailed visual description of the finished dish for image generation"
 }`;
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       max_tokens: 1000,
@@ -168,6 +186,10 @@ Respond in JSON format only:
 
     const recipe = JSON.parse(completion.choices[0].message.content);
     recipe.isAIGenerated = true;
+
+    // Generate DALL-E image for the recipe
+    const imageUrl = await generateRecipeImage(recipe.imagePrompt || recipe.title);
+    recipe.imageUrl = imageUrl;
 
     successResponse(res, { recipe });
   } catch (error) {
@@ -185,7 +207,6 @@ router.post('/generate-meal-plan', async (req, res) => {
     const context = await getUserContext(req.user.id);
 
     if (!openai) {
-      // Mock meal plan if OpenAI not configured
       const mockMeals = [];
       const mealTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
       const sampleMeals = {
@@ -209,12 +230,7 @@ router.post('/generate-meal-plan', async (req, res) => {
 
       return successResponse(res, {
         meals: mockMeals,
-        summary: {
-          goal,
-          dailyCalories,
-          dietType,
-          days,
-        },
+        summary: { goal, dailyCalories, dietType, days },
       });
     }
 
@@ -231,13 +247,12 @@ Respond in JSON format only:
 {
   "meals": [
     {"dayNumber": 1, "mealType": "breakfast", "recipeName": "Meal Name", "calories": 400},
-    {"dayNumber": 1, "mealType": "lunch", "recipeName": "Meal Name", "calories": 500},
-    ...
+    {"dayNumber": 1, "mealType": "lunch", "recipeName": "Meal Name", "calories": 500}
   ]
 }`;
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       max_tokens: 2000,
@@ -247,12 +262,7 @@ Respond in JSON format only:
 
     successResponse(res, {
       meals: result.meals,
-      summary: {
-        goal,
-        dailyCalories,
-        dietType,
-        days,
-      },
+      summary: { goal, dailyCalories, dietType, days },
     });
   } catch (error) {
     console.error('Generate meal plan error:', error);
@@ -268,7 +278,6 @@ router.post('/recommendations', async (req, res) => {
 
     const context = await getUserContext(req.user.id);
 
-    // Get current list items if provided
     let currentItems = [];
     if (listId) {
       const itemsResult = await query(
@@ -279,7 +288,6 @@ router.post('/recommendations', async (req, res) => {
     }
 
     if (!openai) {
-      // Mock recommendations
       return successResponse(res, {
         recommendations: [
           { name: 'Milk', reason: 'Essential dairy staple', department: 'Dairy' },
@@ -305,7 +313,7 @@ Respond in JSON:
 }`;
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       max_tokens: 500,
@@ -331,7 +339,6 @@ router.post('/complementary-items', async (req, res) => {
     }
 
     if (!openai) {
-      // Mock complementary items
       const mockSuggestions = {
         'pasta': ['marinara sauce', 'parmesan cheese', 'garlic bread'],
         'bread': ['butter', 'jam', 'peanut butter'],
@@ -341,7 +348,7 @@ router.post('/complementary-items', async (req, res) => {
 
       let suggestions = [];
       items.forEach(item => {
-        const key = Object.keys(mockSuggestions).find(k => 
+        const key = Object.keys(mockSuggestions).find(k =>
           item.toLowerCase().includes(k)
         );
         if (key) {
@@ -361,7 +368,7 @@ Suggest 5 complementary items that would pair well or complete a meal.
 Respond in JSON: {"suggestions": ["item1", "item2", ...]}`;
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [{ role: 'user', content: prompt }],
       response_format: { type: 'json_object' },
       max_tokens: 200,
@@ -386,7 +393,6 @@ router.post('/optimize-route', async (req, res) => {
       return successResponse(res, { optimizedRoute: [] });
     }
 
-    // Get store layout if available
     let storeLayout = null;
     if (storeId) {
       const layoutResult = await query(
@@ -398,7 +404,6 @@ router.post('/optimize-route', async (req, res) => {
       }
     }
 
-    // Simple department-based ordering
     const departmentOrder = [
       'Produce', 'Bakery', 'Deli', 'Meat', 'Seafood',
       'Dairy', 'Frozen', 'Canned Goods', 'Snacks', 'Beverages',
@@ -432,7 +437,6 @@ router.post('/recognize-image', async (req, res) => {
     }
 
     if (!openai) {
-      // Mock recognition
       return successResponse(res, {
         products: [
           { name: 'Apple', confidence: 0.95, department: 'Produce' },
@@ -442,7 +446,7 @@ router.post('/recognize-image', async (req, res) => {
     }
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [
         {
           role: 'user',
@@ -470,7 +474,8 @@ router.post('/recognize-image', async (req, res) => {
   }
 });
 
-// ── POST /api/ai/generate-list ───────────────────────────────────────────────
+// ── POST /api/ai/generate-list ──────────────────────────────
+
 router.post('/generate-list', async (req, res) => {
   try {
     const { prompt } = req.body;
@@ -485,29 +490,23 @@ router.post('/generate-list', async (req, res) => {
     const lower = prompt.toLowerCase();
     const recipeKeywords = ['recipe', 'cook', 'make', 'prepare', 'dish', 'meal', 'ingredients', 'ingredient'];
     const fullCourseKeywords = ['full course', 'full-course', 'complete dinner', 'complete meal', 'multi course', 'multi-course', 'appetizer and', 'three course', '3 course'];
-    
+
     const isFullCourse = fullCourseKeywords.some(kw => lower.includes(kw));
     const isRecipeRequest = !isFullCourse && recipeKeywords.some(kw => lower.includes(kw));
 
     if (!openai) {
-      // Fallback suggestions based on keywords
-      const suggestions = generateFallbackSuggestions(prompt);
-      return successResponse(res, {
-        suggestions,
-        recipes: [],
-        message: `Here are shopping suggestions for: "${prompt}"`,
-      });
+      return errorResponse(res, 503, 'AI service is temporarily unavailable. Please try again later.');
     }
 
     // ── Build system prompt based on mode ──
     let systemPrompt;
     let userMessage = prompt;
 
-    const dietaryNote = context.dietaryRestrictions.length 
-      ? `\nUser dietary restrictions: ${context.dietaryRestrictions.join(', ')}` 
+    const dietaryNote = context.dietaryRestrictions.length
+      ? `\nUser dietary restrictions: ${context.dietaryRestrictions.join(', ')}`
       : '';
-    const allergenNote = context.allergens.length 
-      ? `\nAllergens to AVOID (never suggest these): ${context.allergens.join(', ')}` 
+    const allergenNote = context.allergens.length
+      ? `\nAllergens to AVOID (never suggest these): ${context.allergens.join(', ')}`
       : '';
 
     if (isFullCourse) {
@@ -522,7 +521,7 @@ CRITICAL RULES:
 Respond ONLY with valid JSON in this exact format:
 {
   "suggestions": [{"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|seafood|deli|household", "reason": "why needed", "price": 0.00}],
-  "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard"}],
+  "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard", "imagePrompt": "a detailed visual description of the finished dish for image generation"}],
   "mealTheme": "Theme name",
   "servings": 4,
   "message": "Friendly summary"
@@ -541,7 +540,7 @@ CRITICAL RULES:
 Respond ONLY with valid JSON:
 {
   "suggestions": [{"item": "item name", "category": "meat", "reason": "main protein for the meal", "price": 15.99}],
-  "recipes": [{"title": "Recipe Name", "description": "Brief description", "prepTime": 30, "servings": 4, "difficulty": "Easy|Medium|Hard", "tags": ["dinner", "cuisine"], "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}], "instructions": ["Step 1...", "Step 2..."]}],
+  "recipes": [{"title": "Recipe Name", "description": "Brief description", "prepTime": 30, "servings": 4, "difficulty": "Easy|Medium|Hard", "tags": ["dinner", "cuisine"], "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}], "instructions": ["Step 1...", "Step 2..."], "imagePrompt": "a detailed visual description of the finished dish for image generation, e.g. spaghetti bolognese with rich meat sauce and parmesan on a white plate"}],
   "message": "Friendly summary message"
 }`;
       userMessage = prompt + '. Please include recipe suggestions with detailed instructions and ingredient lists.';
@@ -581,112 +580,35 @@ Respond ONLY with valid JSON:
       result = JSON.parse(completion.choices[0].message.content);
     } catch (parseError) {
       console.error('Failed to parse AI response:', parseError);
-      const suggestions = generateFallbackSuggestions(prompt);
+      return errorResponse(res, 500, 'Failed to process AI response. Please try again.');
+    }
+
+    // Generate DALL-E images for each recipe
+    const recipes = result.recipes || result.courses || [];
+    if (recipes.length > 0) {
+      const imagePromises = recipes.map(async (recipe) => {
+        const imagePrompt = recipe.imagePrompt || recipe.title || recipe.dishName;
+        const imageUrl = await generateRecipeImage(imagePrompt);
+        return { ...recipe, imageUrl };
+      });
+      const recipesWithImages = await Promise.all(imagePromises);
+
       return successResponse(res, {
-        suggestions,
-        recipes: [],
-        message: `Here are shopping suggestions for: "${prompt}"`,
+        suggestions: result.suggestions || [],
+        recipes: recipesWithImages,
+        message: result.message || 'Here are your shopping suggestions!',
       });
     }
 
     successResponse(res, {
       suggestions: result.suggestions || [],
-      recipes: result.recipes || result.courses || [],
+      recipes: [],
       message: result.message || 'Here are your shopping suggestions!',
     });
   } catch (error) {
     console.error('Generate list error:', error);
-    // Return fallback on any error
-    const suggestions = generateFallbackSuggestions(req.body.prompt || '');
-    successResponse(res, {
-      suggestions,
-      recipes: [],
-      message: 'Here are some suggestions based on your request.',
-    });
+    errorResponse(res, 500, 'AI service error. Please try again.');
   }
 });
-
-// Helper function for fallback suggestions
-function generateFallbackSuggestions(prompt) {
-  const lower = prompt.toLowerCase();
-  
-  if (lower.includes('steak') || lower.includes('beef')) {
-    return [
-      { item: 'ribeye steak', category: 'meat', reason: 'main protein for the meal', price: 15.99 },
-      { item: 'salt', category: 'pantry', reason: 'to season the steak', price: 1.99 },
-      { item: 'pepper', category: 'pantry', reason: 'for seasoning', price: 2.49 },
-      { item: 'olive oil', category: 'pantry', reason: 'for cooking', price: 8.99 },
-      { item: 'butter', category: 'dairy', reason: 'to baste the steak', price: 4.99 },
-      { item: 'garlic', category: 'produce', reason: 'adds flavor when basting', price: 0.99 },
-      { item: 'thyme', category: 'produce', reason: 'adds aroma and flavor', price: 2.99 },
-      { item: 'potatoes', category: 'produce', reason: 'classic side dish', price: 3.99 },
-      { item: 'asparagus', category: 'produce', reason: 'vegetable side dish', price: 4.49 },
-    ];
-  } else if (lower.includes('pasta') || lower.includes('spaghetti') || lower.includes('bolognese')) {
-    return [
-      { item: 'spaghetti', category: 'pantry', reason: 'base pasta for the dish', price: 1.99 },
-      { item: 'ground beef', category: 'meat', reason: 'main protein for the sauce', price: 7.99 },
-      { item: 'onion', category: 'produce', reason: 'adds flavor and aroma', price: 0.99 },
-      { item: 'garlic', category: 'produce', reason: 'enhances the flavor', price: 0.99 },
-      { item: 'carrot', category: 'produce', reason: 'adds sweetness to sauce', price: 1.49 },
-      { item: 'celery', category: 'produce', reason: 'adds depth of flavor', price: 1.99 },
-      { item: 'canned tomatoes', category: 'pantry', reason: 'base of the sauce', price: 2.49 },
-      { item: 'tomato paste', category: 'pantry', reason: 'thickens and enriches sauce', price: 1.29 },
-      { item: 'parmesan cheese', category: 'dairy', reason: 'for topping', price: 6.99 },
-    ];
-  } else if (lower.includes('taco') || lower.includes('mexican')) {
-    return [
-      { item: 'ground beef', category: 'meat', reason: 'taco filling base', price: 7.99 },
-      { item: 'taco shells', category: 'bakery', reason: 'to hold the filling', price: 3.49 },
-      { item: 'lettuce', category: 'produce', reason: 'fresh topping', price: 1.99 },
-      { item: 'tomatoes', category: 'produce', reason: 'diced for topping', price: 2.49 },
-      { item: 'cheese', category: 'dairy', reason: 'shredded for topping', price: 4.99 },
-      { item: 'sour cream', category: 'dairy', reason: 'creamy topping', price: 2.99 },
-      { item: 'taco seasoning', category: 'pantry', reason: 'flavors the meat', price: 1.49 },
-      { item: 'onion', category: 'produce', reason: 'adds crunch and flavor', price: 0.99 },
-    ];
-  } else if (lower.includes('chicken')) {
-    return [
-      { item: 'chicken breast', category: 'meat', reason: 'main protein', price: 8.99 },
-      { item: 'olive oil', category: 'pantry', reason: 'for cooking', price: 8.99 },
-      { item: 'garlic', category: 'produce', reason: 'adds flavor', price: 0.99 },
-      { item: 'lemon', category: 'produce', reason: 'for brightness', price: 0.79 },
-      { item: 'rosemary', category: 'produce', reason: 'aromatic herb', price: 2.99 },
-      { item: 'salt', category: 'pantry', reason: 'for seasoning', price: 1.99 },
-      { item: 'pepper', category: 'pantry', reason: 'for seasoning', price: 2.49 },
-    ];
-  } else if (lower.includes('breakfast') || lower.includes('egg')) {
-    return [
-      { item: 'eggs', category: 'dairy', reason: 'breakfast protein', price: 4.99 },
-      { item: 'bacon', category: 'meat', reason: 'classic breakfast side', price: 6.99 },
-      { item: 'bread', category: 'bakery', reason: 'for toast', price: 3.49 },
-      { item: 'butter', category: 'dairy', reason: 'for cooking and toast', price: 4.99 },
-      { item: 'orange juice', category: 'beverages', reason: 'breakfast drink', price: 4.49 },
-      { item: 'milk', category: 'dairy', reason: 'for coffee or cereal', price: 3.99 },
-    ];
-  } else if (lower.includes('salad') || lower.includes('healthy')) {
-    return [
-      { item: 'mixed greens', category: 'produce', reason: 'salad base', price: 4.99 },
-      { item: 'cherry tomatoes', category: 'produce', reason: 'adds color and flavor', price: 3.99 },
-      { item: 'cucumber', category: 'produce', reason: 'refreshing crunch', price: 1.49 },
-      { item: 'avocado', category: 'produce', reason: 'healthy fats', price: 2.49 },
-      { item: 'olive oil', category: 'pantry', reason: 'for dressing', price: 8.99 },
-      { item: 'lemon', category: 'produce', reason: 'for dressing', price: 0.79 },
-      { item: 'feta cheese', category: 'dairy', reason: 'adds protein and flavor', price: 5.99 },
-    ];
-  } else {
-    // Generic suggestions
-    return [
-      { item: 'chicken breast', category: 'meat', reason: 'versatile protein', price: 8.99 },
-      { item: 'rice', category: 'pantry', reason: 'staple grain', price: 3.99 },
-      { item: 'broccoli', category: 'produce', reason: 'healthy vegetable', price: 2.99 },
-      { item: 'olive oil', category: 'pantry', reason: 'for cooking', price: 8.99 },
-      { item: 'garlic', category: 'produce', reason: 'adds flavor', price: 0.99 },
-      { item: 'onion', category: 'produce', reason: 'base for many dishes', price: 0.99 },
-      { item: 'salt', category: 'pantry', reason: 'essential seasoning', price: 1.99 },
-      { item: 'pepper', category: 'pantry', reason: 'essential seasoning', price: 2.49 },
-    ];
-  }
-}
 
 module.exports = router;
