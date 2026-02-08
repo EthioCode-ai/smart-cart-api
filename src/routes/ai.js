@@ -23,22 +23,27 @@ try {
   console.warn('OpenAI not configured. AI features will return mock data.');
 }
 
+// Default fallback image when DALL-E fails
+const DEFAULT_RECIPE_IMAGE = 'https://images.unsplash.com/photo-1495521821757-a1efb6729352?w=600&h=400&fit=crop';
+
 // ── Helper: Generate recipe image with DALL-E ───────────────
 
-const generateRecipeImage = async (imagePrompt) => {
-  if (!openai || !imagePrompt) return null;
+const generateRecipeImage = async (recipeTitle, recipeDescription) => {
+  if (!openai || !recipeTitle) return DEFAULT_RECIPE_IMAGE;
   try {
+    const prompt = `A professional, appetizing food photography shot of ${recipeTitle}. ${recipeDescription || ''}. High quality, well-lit, restaurant-style plating, garnished beautifully, overhead view, vibrant colors, depth of field.`;
+
     const response = await openai.images.generate({
       model: 'dall-e-3',
-      prompt: `Professional food photography of ${imagePrompt}. Overhead shot on a clean plate, soft natural lighting, appetizing presentation. No text or labels.`,
+      prompt,
       n: 1,
       size: '1024x1024',
       quality: 'standard',
     });
-    return response.data[0]?.url || null;
+    return response.data[0]?.url || DEFAULT_RECIPE_IMAGE;
   } catch (error) {
     console.error('DALL-E image generation error:', error.message);
-    return null;
+    return DEFAULT_RECIPE_IMAGE;
   }
 };
 
@@ -150,6 +155,7 @@ router.post('/generate-recipe', async (req, res) => {
             { step: 3, text: 'Toss pasta with vegetables and top with parmesan.' },
           ],
           nutrition: { calories: 450, protein: 15, carbs: 65, fat: 14 },
+          imageUrl: DEFAULT_RECIPE_IMAGE,
           isAIGenerated: true,
         },
       });
@@ -173,8 +179,7 @@ Respond in JSON format only:
   "servings": ${servings},
   "ingredients": [{"name": "ingredient", "quantity": "1", "unit": "cup"}],
   "instructions": [{"step": 1, "text": "instruction"}],
-  "nutrition": {"calories": 350, "protein": 20, "carbs": 45, "fat": 12},
-  "imagePrompt": "a detailed visual description of the finished dish for image generation"
+  "nutrition": {"calories": 350, "protein": 20, "carbs": 45, "fat": 12}
 }`;
 
     const completion = await openai.chat.completions.create({
@@ -188,8 +193,7 @@ Respond in JSON format only:
     recipe.isAIGenerated = true;
 
     // Generate DALL-E image for the recipe
-    const imageUrl = await generateRecipeImage(recipe.imagePrompt || recipe.title);
-    recipe.imageUrl = imageUrl;
+    recipe.imageUrl = await generateRecipeImage(recipe.title, recipe.description);
 
     successResponse(res, { recipe });
   } catch (error) {
@@ -521,7 +525,7 @@ CRITICAL RULES:
 Respond ONLY with valid JSON in this exact format:
 {
   "suggestions": [{"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|seafood|deli|household", "reason": "why needed", "price": 0.00}],
-  "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard", "imagePrompt": "a detailed visual description of the finished dish for image generation"}],
+  "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard"}],
   "mealTheme": "Theme name",
   "servings": 4,
   "message": "Friendly summary"
@@ -540,7 +544,7 @@ CRITICAL RULES:
 Respond ONLY with valid JSON:
 {
   "suggestions": [{"item": "item name", "category": "meat", "reason": "main protein for the meal", "price": 15.99}],
-  "recipes": [{"title": "Recipe Name", "description": "Brief description", "prepTime": 30, "servings": 4, "difficulty": "Easy|Medium|Hard", "tags": ["dinner", "cuisine"], "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}], "instructions": ["Step 1...", "Step 2..."], "imagePrompt": "a detailed visual description of the finished dish for image generation, e.g. spaghetti bolognese with rich meat sauce and parmesan on a white plate"}],
+  "recipes": [{"title": "Recipe Name", "description": "Brief description", "prepTime": 30, "servings": 4, "difficulty": "Easy|Medium|Hard", "tags": ["dinner", "cuisine"], "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}], "instructions": ["Step 1...", "Step 2..."]}],
   "message": "Friendly summary message"
 }`;
       userMessage = prompt + '. Please include recipe suggestions with detailed instructions and ingredient lists.';
@@ -564,6 +568,7 @@ Respond ONLY with valid JSON:
 }`;
     }
 
+    // ── Step 1: Call GPT-4o for recipe/list content ──
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
@@ -583,15 +588,17 @@ Respond ONLY with valid JSON:
       return errorResponse(res, 500, 'Failed to process AI response. Please try again.');
     }
 
-    // Generate DALL-E images for each recipe
+    // ── Step 2: Generate DALL-E images for each recipe ──
     const recipes = result.recipes || result.courses || [];
     if (recipes.length > 0) {
-      const imagePromises = recipes.map(async (recipe) => {
-        const imagePrompt = recipe.imagePrompt || recipe.title || recipe.dishName;
-        const imageUrl = await generateRecipeImage(imagePrompt);
-        return { ...recipe, imageUrl };
-      });
-      const recipesWithImages = await Promise.all(imagePromises);
+      const recipesWithImages = await Promise.all(
+        recipes.map(async (recipe) => {
+          const title = recipe.title || recipe.dishName;
+          const description = recipe.description || '';
+          const imageUrl = await generateRecipeImage(title, description);
+          return { ...recipe, imageUrl };
+        })
+      );
 
       return successResponse(res, {
         suggestions: result.suggestions || [],
