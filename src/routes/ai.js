@@ -1,6 +1,6 @@
 // src/routes/ai.js
 // ============================================================
-// AI Routes (OpenAI Integration)
+// AI Routes (OpenAI Integration) — GPT-Driven Mode Detection
 // ============================================================
 
 const express = require('express');
@@ -9,10 +9,8 @@ const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
-// All routes require authentication
 router.use(authenticate);
 
-// OpenAI client setup
 let openai = null;
 try {
   const OpenAI = require('openai');
@@ -23,7 +21,6 @@ try {
   console.warn('OpenAI not configured. AI features will return mock data.');
 }
 
-// Default fallback image when DALL-E fails
 const DEFAULT_RECIPE_IMAGE = 'https://images.unsplash.com/photo-1495521821757-a1efb6729352?w=600&h=400&fit=crop';
 
 // ── Helper: Generate recipe image with DALL-E ───────────────
@@ -161,7 +158,16 @@ router.post('/generate-recipe', async (req, res) => {
       });
     }
 
-    const prompt = `Generate a recipe with the following requirements:
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `You are an expert chef. Generate detailed recipes with precise ingredients and clear instructions. Always consider dietary restrictions and allergens. Respond in JSON format only.`
+        },
+        {
+          role: 'user',
+          content: `Generate a recipe with the following requirements:
 ${ingredients ? `- Include these ingredients: ${ingredients.join(', ')}` : ''}
 ${cuisine ? `- Cuisine style: ${cuisine}` : ''}
 - Servings: ${servings}
@@ -169,7 +175,7 @@ ${mealType ? `- Meal type: ${mealType}` : ''}
 ${context.dietaryRestrictions.length ? `- Dietary restrictions: ${context.dietaryRestrictions.join(', ')}` : ''}
 ${context.allergens.length ? `- Avoid allergens: ${context.allergens.join(', ')}` : ''}
 
-Respond in JSON format only:
+Respond in JSON:
 {
   "title": "Recipe Name",
   "description": "Brief description",
@@ -180,13 +186,8 @@ Respond in JSON format only:
   "ingredients": [{"name": "ingredient", "quantity": "1", "unit": "cup"}],
   "instructions": [{"step": 1, "text": "instruction"}],
   "nutrition": {"calories": 350, "protein": 20, "carbs": 45, "fat": 12}
-}`;
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are an expert chef and culinary advisor. Generate detailed, accurate recipes with precise ingredient quantities and clear step-by-step instructions.' },
-        { role: 'user', content: prompt },
+}`
+        }
       ],
       response_format: { type: 'json_object' },
       max_tokens: 1000,
@@ -194,7 +195,9 @@ Respond in JSON format only:
 
     const recipe = JSON.parse(completion.choices[0].message.content);
     recipe.isAIGenerated = true;
-    recipe.imageUrl = await generateRecipeImage(recipe.title, recipe.description);
+
+    const imageUrl = await generateRecipeImage(recipe.title, recipe.description);
+    recipe.imageUrl = imageUrl;
 
     successResponse(res, { recipe });
   } catch (error) {
@@ -239,7 +242,16 @@ router.post('/generate-meal-plan', async (req, res) => {
       });
     }
 
-    const prompt = `Generate a ${days}-day meal plan with:
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a professional meal planning nutritionist. Create balanced meal plans that meet nutritional goals and dietary preferences. Always consider the user's restrictions and allergens. Respond in JSON format only.`
+        },
+        {
+          role: 'user',
+          content: `Generate a ${days}-day meal plan with:
 - Goal: ${goal || 'General health'}
 - Daily calories: ${dailyCalories}
 - Diet type: ${dietType || 'Balanced'}
@@ -248,19 +260,14 @@ ${context.allergens.length ? `- Avoid allergens: ${context.allergens.join(', ')}
 
 For each day, include breakfast, lunch, dinner, and one snack.
 
-Respond in JSON format only:
+Respond in JSON:
 {
   "meals": [
     {"dayNumber": 1, "mealType": "breakfast", "recipeName": "Meal Name", "calories": 400},
     {"dayNumber": 1, "mealType": "lunch", "recipeName": "Meal Name", "calories": 500}
   ]
-}`;
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are an expert nutritionist and meal planner. Generate balanced, varied meal plans that meet the specified nutritional goals.' },
-        { role: 'user', content: prompt },
+}`
+        }
       ],
       response_format: { type: 'json_object' },
       max_tokens: 2000,
@@ -307,7 +314,16 @@ router.post('/recommendations', async (req, res) => {
       });
     }
 
-    const prompt = `Based on a shopping list containing: ${currentItems.join(', ') || 'nothing yet'}
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a smart grocery shopping assistant. Suggest items based on what the user already has, considering dietary needs and common meal patterns. Respond in JSON format only.`
+        },
+        {
+          role: 'user',
+          content: `Based on a shopping list containing: ${currentItems.join(', ') || 'nothing yet'}
 
 Suggest 5 grocery items the user might need.
 Consider dietary restrictions: ${context.dietaryRestrictions.join(', ') || 'None'}
@@ -318,11 +334,9 @@ Respond in JSON:
   "recommendations": [
     {"name": "Item", "reason": "Why suggested", "department": "Store department"}
   ]
-}`;
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: prompt }],
+}`
+        }
+      ],
       response_format: { type: 'json_object' },
       max_tokens: 500,
     });
@@ -369,15 +383,22 @@ router.post('/complementary-items', async (req, res) => {
       });
     }
 
-    const prompt = `Given these grocery items: ${items.join(', ')}
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a grocery shopping expert. Suggest complementary items that pair well together or complete a meal. Respond in JSON format only.`
+        },
+        {
+          role: 'user',
+          content: `Given these grocery items: ${items.join(', ')}
 
 Suggest 5 complementary items that would pair well or complete a meal.
 
-Respond in JSON: {"suggestions": ["item1", "item2", ...]}`;
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: prompt }],
+Respond in JSON: {"suggestions": ["item1", "item2", "item3", "item4", "item5"]}`
+        }
+      ],
       response_format: { type: 'json_object' },
       max_tokens: 200,
     });
@@ -457,6 +478,10 @@ router.post('/recognize-image', async (req, res) => {
       model: 'gpt-4o',
       messages: [
         {
+          role: 'system',
+          content: `You are a grocery product identification expert. Analyze images to identify food items, brands, and products with high accuracy. Respond in JSON format only.`
+        },
+        {
           role: 'user',
           content: [
             {
@@ -470,6 +495,7 @@ router.post('/recognize-image', async (req, res) => {
           ],
         },
       ],
+      response_format: { type: 'json_object' },
       max_tokens: 500,
     });
 
@@ -483,6 +509,28 @@ router.post('/recognize-image', async (req, res) => {
 });
 
 // ── POST /api/ai/generate-list ──────────────────────────────
+//
+// UNIFIED AI ENDPOINT — GPT-Driven Mode Detection
+//
+// Instead of keyword detection, GPT-4o decides the mode by
+// returning a "mode" field in its JSON response. This handles
+// ambiguous requests much better than keyword matching.
+//
+// 4 modes:
+//   "shopping_list" — user wants items to buy
+//   "recipe"        — user wants cooking instructions + ingredients
+//   "full_course"   — user wants a multi-course meal experience
+//   "chat"          — general question, advice, or conversation
+//
+// Examples keyword detection would get WRONG:
+//   "I'm hosting Saturday"            → full_course
+//   "What goes with chicken?"         → shopping_list
+//   "Help me use up my leftover rice" → recipe
+//   "Stuff for tacos"                 → shopping_list
+//   "Teach me to make pasta"          → recipe
+//   "What's a good substitute for butter?" → chat
+//   "How long does chicken last in the fridge?" → chat
+// ─────────────────────────────────────────────────────────────
 
 router.post('/generate-list', async (req, res) => {
   try {
@@ -496,43 +544,88 @@ router.post('/generate-list', async (req, res) => {
       return errorResponse(res, 503, 'AI service is temporarily unavailable. Please try again later.');
     }
 
-    // ── Mode Detection ──
-    const lower = prompt.toLowerCase();
-    const recipeKeywords = ['recipe', 'cook', 'make', 'prepare', 'dish', 'meal', 'ingredients', 'ingredient'];
-    const fullCourseKeywords = ['full course', 'full-course', 'complete dinner', 'complete meal', 'multi course', 'multi-course', 'appetizer and', 'three course', '3 course'];
+    const context = await getUserContext(req.user.id);
 
-    const isFullCourse = fullCourseKeywords.some(kw => lower.includes(kw));
-    const isRecipeRequest = !isFullCourse && recipeKeywords.some(kw => lower.includes(kw));
+    const systemPrompt = `You are Smart Cart, an expert AI shopping assistant, chef, and meal planner.
 
-    let systemPrompt;
-    let userMessage = prompt;
+User's dietary restrictions: ${context.dietaryRestrictions.join(', ') || 'None'}
+User's allergens: ${context.allergens.join(', ') || 'None'}
 
-    if (isFullCourse) {
-      // ── Mode 3: Full-Course Meal ──
-      systemPrompt = `You are an expert chef and meal planner. When asked for a full-course meal, provide a complete dining experience with multiple courses (appetizer, main course, side dishes, dessert, and optional beverage). Each course should be a distinct dish with its own ingredients list.
+Analyze the user's message and determine the best response mode:
 
-Respond with JSON: { "suggestions": [{"item": "item name", "category": "produce|meat|dairy|pantry|bakery|frozen|beverages|seafood|deli|household", "reason": "why needed", "price": 0.00}], "courses": [{"courseType": "appetizer|main|side|dessert", "dishName": "Name", "description": "Brief desc", "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}], "prepTime": 30, "difficulty": "Easy|Medium|Hard"}], "mealTheme": "Theme name", "servings": 4, "message": "Friendly summary" }`;
+MODE 1 — "shopping_list": User wants items to buy (groceries, supplies, ingredients for a quick meal).
+MODE 2 — "recipe": User wants a recipe, cooking instructions, or asks how to make/cook/prepare something.
+MODE 3 — "full_course": User wants a multi-course meal, dinner party menu, or complete dining experience.
+MODE 4 — "chat": User is asking a general food/cooking question, seeking advice, or making conversation that doesn't need a list or recipe. Examples: substitution questions, food storage tips, cooking techniques, nutrition questions.
 
-    } else if (isRecipeRequest) {
-      // ── Mode 2: Shopping List + Recipes ──
-      systemPrompt = `You are a helpful shopping assistant and culinary expert. Generate shopping list items based on user requests AND provide recipe suggestions when appropriate. Categorize items (produce, dairy, meat, pantry, etc.) and provide brief reasons. When recipes are requested or appropriate, include detailed recipes with full instructions. Respond with JSON: { "suggestions": [{"item": "item name", "category": "category", "reason": "brief reason", "price": 0.00}], "recipes": [{"title": "Recipe Name", "description": "Brief description", "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}], "instructions": ["Step 1...", "Step 2..."], "prepTime": 25, "servings": 4, "difficulty": "Easy|Medium|Hard", "tags": ["dinner", "cuisine"]}], "message": "helpful message" }`;
+You MUST include a "mode" field in your response so the app knows how to display the results.
 
-      userMessage = prompt + '. Please include recipe suggestions with detailed instructions and ingredient lists.';
+Respond in JSON with ONE of these structures based on your chosen mode:
 
-    } else {
-      // ── Mode 1: Shopping List Only ──
-      systemPrompt = `You are a helpful shopping assistant. Generate shopping list items based on user requests. Categorize items (produce, dairy, meat, pantry, etc.) and provide brief reasons. Respond with JSON: { "suggestions": [{"item": "milk", "category": "dairy", "reason": "essential for breakfast", "price": 0.00}], "message": "helpful message" }`;
-    }
+If mode is "shopping_list":
+{
+  "mode": "shopping_list",
+  "suggestions": [{"item": "milk", "category": "dairy", "reason": "essential staple", "price": 0.00}],
+  "message": "friendly summary"
+}
 
-    // ── Call GPT-4o ──
+If mode is "recipe":
+{
+  "mode": "recipe",
+  "suggestions": [{"item": "ground beef", "category": "meat", "reason": "main protein", "price": 0.00}],
+  "recipes": [{
+    "title": "Recipe Name",
+    "description": "Brief description",
+    "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}],
+    "instructions": ["Step 1...", "Step 2..."],
+    "prepTime": 25,
+    "servings": 4,
+    "difficulty": "Easy|Medium|Hard",
+    "tags": ["dinner", "mexican"]
+  }],
+  "message": "friendly summary"
+}
+
+If mode is "full_course":
+{
+  "mode": "full_course",
+  "courses": [{
+    "courseType": "appetizer|main|side|dessert|beverage",
+    "dishName": "Dish Name",
+    "description": "Brief description",
+    "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}],
+    "prepTime": 30,
+    "difficulty": "Easy|Medium|Hard"
+  }],
+  "mealTheme": "Theme name",
+  "servings": 4,
+  "message": "friendly summary"
+}
+
+If mode is "chat":
+{
+  "mode": "chat",
+  "response": "Your helpful, conversational answer here.",
+  "suggestions": ["Follow-up suggestion 1", "Follow-up suggestion 2", "Follow-up suggestion 3"],
+  "message": "friendly summary"
+}
+
+Important rules:
+- Always consider dietary restrictions and allergens
+- Be specific with ingredient quantities
+- For recipes, include both the shopping list items AND the recipe details
+- For full course, include all courses (appetizer, main, side, dessert)
+- For chat, be concise, friendly, and actionable — suggest next steps the user might want to take
+- Choose the mode that BEST matches the user's true intent, not just keywords`;
+
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
+        { role: 'user', content: prompt },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 1500,
+      max_tokens: 2000,
       temperature: 0.7,
     });
 
@@ -544,29 +637,116 @@ Respond with JSON: { "suggestions": [{"item": "item name", "category": "produce|
       return errorResponse(res, 500, 'Failed to process AI response. Please try again.');
     }
 
-    // ── Generate DALL-E images for each recipe ──
-    const recipes = result.recipes || result.courses || [];
-    let recipesWithImages = recipes;
+    const mode = result.mode || 'shopping_list';
 
-    if (recipes.length > 0) {
-      recipesWithImages = await Promise.all(
-        recipes.map(async (recipe) => {
-          const title = recipe.title || recipe.dishName;
-          const description = recipe.description || '';
-          const imageUrl = await generateRecipeImage(title, description);
-          return { ...recipe, imageUrl };
-        })
-      );
+    // ── Image generation logic ──────────────────────────────
+    // recipe mode:      one image per recipe (usually just 1 recipe)
+    // full_course mode: one hero image for the meal theme (not per course)
+    // chat/shopping:    no images needed
+
+    let heroImageUrl = null;
+
+    if (mode === 'recipe' && result.recipes && result.recipes.length > 0) {
+      // Generate image for each recipe (typically 1)
+      const imagePromises = result.recipes.map(async (recipe) => {
+        const imageUrl = await generateRecipeImage(recipe.title, recipe.description || '');
+        return { ...recipe, imageUrl };
+      });
+
+      try {
+        result.recipes = await Promise.race([
+          Promise.all(imagePromises),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
+        ]);
+      } catch (timeoutErr) {
+        result.recipes = result.recipes.map(recipe => ({
+          ...recipe,
+          imageUrl: DEFAULT_RECIPE_IMAGE,
+        }));
+      }
+    } else if (mode === 'full_course' && result.mealTheme) {
+      // Single hero image for the entire meal theme — faster, cheaper
+      try {
+        heroImageUrl = await Promise.race([
+          generateRecipeImage(result.mealTheme, `A beautiful ${result.mealTheme} dining experience`),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
+        ]);
+      } catch (timeoutErr) {
+        heroImageUrl = DEFAULT_RECIPE_IMAGE;
+      }
     }
 
-    successResponse(res, {
-      suggestions: result.suggestions || [],
-      recipes: recipesWithImages,
-      message: result.message || 'Here are your shopping suggestions!',
-    });
+    // ── Build response based on mode ────────────────────────
+
+    const response = {
+      mode,
+      message: result.message || 'Here are your results!',
+    };
+
+    if (mode === 'shopping_list') {
+      response.suggestions = result.suggestions || [];
+    } else if (mode === 'recipe') {
+      response.suggestions = result.suggestions || [];
+      response.recipes = result.recipes || [];
+    } else if (mode === 'full_course') {
+      response.courses = result.courses || [];
+      response.mealTheme = result.mealTheme || '';
+      response.servings = result.servings || 4;
+      response.heroImageUrl = heroImageUrl || DEFAULT_RECIPE_IMAGE;
+    } else if (mode === 'chat') {
+      response.response = result.response || result.message || '';
+      response.suggestions = result.suggestions || [];
+    }
+
+    successResponse(res, response);
   } catch (error) {
     console.error('Generate list error:', error);
     errorResponse(res, 500, 'AI service error. Please try again.');
+  }
+});
+
+// ── POST /api/ai/transcribe ─────────────────────────────────
+//
+// Speech-to-text via OpenAI Whisper.
+// Receives base64-encoded audio from the mobile app,
+// writes to a temp file, sends to Whisper, returns text.
+// The frontend then feeds the text into /generate-list.
+// ─────────────────────────────────────────────────────────────
+
+router.post('/transcribe', async (req, res) => {
+  try {
+    const { audio } = req.body;
+
+    if (!audio) {
+      return errorResponse(res, 400, 'Audio data is required');
+    }
+
+    if (!openai) {
+      return errorResponse(res, 503, 'AI service is temporarily unavailable.');
+    }
+
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+
+    const tempPath = path.join(os.tmpdir(), `recording-${Date.now()}.m4a`);
+    const audioBuffer = Buffer.from(audio, 'base64');
+    fs.writeFileSync(tempPath, audioBuffer);
+
+    try {
+      const transcription = await openai.audio.transcriptions.create({
+        model: 'whisper-1',
+        file: fs.createReadStream(tempPath),
+        language: 'en',
+      });
+
+      successResponse(res, { text: transcription.text });
+    } finally {
+      try { fs.unlinkSync(tempPath); } catch (e) { /* cleanup best-effort */ }
+    }
+  } catch (error) {
+    console.error('Transcription error:', error);
+    errorResponse(res, 500, 'Failed to transcribe audio. Please try again.');
   }
 });
 
