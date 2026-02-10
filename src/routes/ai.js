@@ -565,14 +565,14 @@ Respond in JSON with ONE of these structures based on your chosen mode:
 If mode is "shopping_list":
 {
   "mode": "shopping_list",
-  "suggestions": [{"item": "milk", "category": "dairy", "reason": "essential staple", "price": 0.00}],
+  "suggestions": [{"item": "milk", "category": "dairy", "reason": "essential staple", "price": 3.49}],
   "message": "friendly summary"
 }
 
 If mode is "recipe":
 {
   "mode": "recipe",
-  "suggestions": [{"item": "ground beef", "category": "meat", "reason": "main protein", "price": 0.00}],
+  "suggestions": [{"item": "ground beef", "category": "meat", "reason": "main protein", "price": 6.99}],
   "recipes": [{
     "title": "Recipe Name",
     "description": "Brief description",
@@ -616,7 +616,8 @@ Important rules:
 - For recipes, include both the shopping list items AND the recipe details
 - For full course, include all courses (appetizer, main, side, dessert)
 - For chat, be concise, friendly, and actionable — suggest next steps the user might want to take
-- Choose the mode that BEST matches the user's true intent, not just keywords`;
+- Choose the mode that BEST matches the user's true intent, not just keywords
+- For all suggestions, estimate realistic US grocery store prices in USD for each item. Never use 0.00 as a price.`;
 
     const completion = await openai.chat.completions.create({
       model: 'gpt-4o',
