@@ -14,14 +14,17 @@ const router = express.Router();
 router.use(authenticate);
 
 // ── GET /api/lists ──────────────────────────────────────────
+// Returns all lists WITH their items nested inside.
+// Uses two queries (not N+1):
+//   1. Fetch all lists for the user
+//   2. Fetch all items for those lists in one query
+//   3. Merge items into their respective lists in JS
 
 router.get('/', async (req, res) => {
   try {
-    const result = await query(
-      `SELECT sl.*, 
-        (SELECT COUNT(*) FROM list_items li WHERE li.list_id = sl.id) as item_count,
-        (SELECT COUNT(*) FROM list_items li WHERE li.list_id = sl.id AND li.checked = true) as checked_count,
-        (SELECT COALESCE(SUM(li.price * li.quantity), 0) FROM list_items li WHERE li.list_id = sl.id) as total_cost
+    // 1. Fetch all lists for this user
+    const listsResult = await query(
+      `SELECT sl.*
        FROM shopping_lists sl
        LEFT JOIN list_collaborators lc ON sl.id = lc.list_id AND lc.user_id = $1
        WHERE sl.user_id = $1 OR lc.user_id = $1
@@ -29,17 +32,64 @@ router.get('/', async (req, res) => {
       [req.user.id]
     );
 
-    const lists = result.rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      shareCode: row.share_code,
-      isActive: row.is_active,
-      itemCount: parseInt(row.item_count),
-      checkedCount: parseInt(row.checked_count),
-      totalCost: parseFloat(row.total_cost) || 0,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    const listRows = listsResult.rows;
+
+    if (listRows.length === 0) {
+      return successResponse(res, { lists: [] });
+    }
+
+    // 2. Fetch all items for all of these lists in one query
+    const listIds = listRows.map(l => l.id);
+    const itemsResult = await query(
+      `SELECT li.*, u.name as added_by_name
+       FROM list_items li
+       LEFT JOIN users u ON li.added_by = u.id
+       WHERE li.list_id = ANY($1)
+       ORDER BY li.department, li.created_at`,
+      [listIds]
+    );
+
+    // 3. Group items by list_id
+    const itemsByListId = {};
+    for (const item of itemsResult.rows) {
+      if (!itemsByListId[item.list_id]) {
+        itemsByListId[item.list_id] = [];
+      }
+      itemsByListId[item.list_id].push({
+        id: item.id,
+        name: item.name,
+        price: parseFloat(item.price) || 0,
+        quantity: item.quantity || 1,
+        unit: item.unit || null,
+        department: item.department,
+        category: item.department,
+        checked: item.checked || false,
+        notes: item.notes || '',
+        addedBy: item.added_by,
+        addedByName: item.added_by_name,
+        createdAt: item.created_at,
+      });
+    }
+
+    // 4. Merge items into lists
+    const lists = listRows.map(row => {
+      const items = itemsByListId[row.id] || [];
+      const checkedCount = items.filter(i => i.checked).length;
+      const totalCost = items.reduce((sum, i) => sum + (i.price * i.quantity), 0);
+
+      return {
+        id: row.id,
+        name: row.name,
+        shareCode: row.share_code,
+        isActive: row.is_active,
+        itemCount: items.length,
+        checkedCount,
+        totalCost: Math.round(totalCost * 100) / 100,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        items,
+      };
+    });
 
     successResponse(res, { lists });
   } catch (error) {
@@ -78,6 +128,7 @@ router.post('/', async (req, res) => {
         totalCost: 0,
         createdAt: list.created_at,
         updatedAt: list.updated_at,
+        items: [],
       },
     }, 201);
   } catch (error) {
@@ -119,8 +170,11 @@ router.get('/:id', async (req, res) => {
       name: item.name,
       price: parseFloat(item.price) || 0,
       quantity: item.quantity,
+      unit: item.unit || null,
       department: item.department,
+      category: item.department,
       checked: item.checked,
+      notes: item.notes || '',
       addedBy: item.added_by,
       addedByName: item.added_by_name,
       createdAt: item.created_at,
@@ -157,7 +211,7 @@ router.put('/:id', async (req, res) => {
     const { name, isActive } = req.body;
 
     const result = await query(
-      `UPDATE shopping_lists 
+      `UPDATE shopping_lists
        SET name = COALESCE($1, name),
            is_active = COALESCE($2, is_active),
            updated_at = NOW()
@@ -212,7 +266,7 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/:id/items', async (req, res) => {
   try {
-    const { name, price, quantity, department } = req.body;
+    const { name, price, quantity, unit, department, notes } = req.body;
 
     if (!name || !name.trim()) {
       return errorResponse(res, 400, 'Item name is required');
@@ -231,10 +285,10 @@ router.post('/:id/items', async (req, res) => {
     }
 
     const result = await query(
-      `INSERT INTO list_items (list_id, name, price, quantity, department, added_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, added_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING *`,
-      [req.params.id, name.trim(), price || 0, quantity || 1, department, req.user.id]
+      [req.params.id, name.trim(), price || 0, quantity || 1, unit || null, department, notes || null, req.user.id]
     );
 
     // Update list timestamp
@@ -251,8 +305,11 @@ router.post('/:id/items', async (req, res) => {
         name: item.name,
         price: parseFloat(item.price) || 0,
         quantity: item.quantity,
+        unit: item.unit || null,
         department: item.department,
+        category: item.department,
         checked: item.checked,
+        notes: item.notes || '',
         addedBy: item.added_by,
         createdAt: item.created_at,
       },
@@ -379,7 +436,7 @@ router.patch('/:id/items/:itemId/toggle', async (req, res) => {
     }
 
     const result = await query(
-      `UPDATE list_items 
+      `UPDATE list_items
        SET checked = NOT checked, updated_at = NOW()
        WHERE id = $1 AND list_id = $2
        RETURNING *`,
@@ -531,7 +588,7 @@ router.get('/:id/cost', async (req, res) => {
       });
     }
 
-    const subtotal = result.rows.reduce((sum, item) => 
+    const subtotal = result.rows.reduce((sum, item) =>
       sum + (parseFloat(item.price) || 0) * (item.quantity || 1), 0
     );
     const tax = subtotal * taxRate;
