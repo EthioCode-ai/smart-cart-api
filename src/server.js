@@ -22,6 +22,7 @@ const mealPlansRoutes = require('./routes/mealPlans');
 const settingsRoutes = require('./routes/settings');
 const aiRoutes = require('./routes/ai');
 const dashboardRoutes = require('./routes/dashboard');
+const storeLayoutRoutes = require('./routes/storeLayouts');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -66,6 +67,7 @@ app.use('/api/meal-plans', mealPlansRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/store-layouts', storeLayoutRoutes);
 app.use('/api/notifications', dashboardRoutes);
 
 // ── Health Check ────────────────────────────────────────────
