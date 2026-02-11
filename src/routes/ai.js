@@ -645,37 +645,14 @@ Important rules:
     // full_course mode: one hero image for the meal theme (not per course)
     // chat/shopping:    no images needed
 
-    let heroImageUrl = null;
-
+    // Assign placeholder images — real images load async via /api/ai/generate-image
     if (mode === 'recipe' && result.recipes && result.recipes.length > 0) {
-      // Generate image for each recipe (typically 1)
-      const imagePromises = result.recipes.map(async (recipe) => {
-        const imageUrl = await generateRecipeImage(recipe.title, recipe.description || '');
-        return { ...recipe, imageUrl };
-      });
-
-      try {
-        result.recipes = await Promise.race([
-          Promise.all(imagePromises),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
-        ]);
-      } catch (timeoutErr) {
-        result.recipes = result.recipes.map(recipe => ({
-          ...recipe,
-          imageUrl: DEFAULT_RECIPE_IMAGE,
-        }));
-      }
-    } else if (mode === 'full_course' && result.mealTheme) {
-      // Single hero image for the entire meal theme — faster, cheaper
-      try {
-        heroImageUrl = await Promise.race([
-          generateRecipeImage(result.mealTheme, `A beautiful ${result.mealTheme} dining experience`),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000))
-        ]);
-      } catch (timeoutErr) {
-        heroImageUrl = DEFAULT_RECIPE_IMAGE;
-      }
+      result.recipes = result.recipes.map(recipe => ({
+        ...recipe,
+        imageUrl: DEFAULT_RECIPE_IMAGE,
+      }));
     }
+    let heroImageUrl = DEFAULT_RECIPE_IMAGE;
 
     // ── Build response based on mode ────────────────────────
 
@@ -748,6 +725,22 @@ router.post('/transcribe', async (req, res) => {
   } catch (error) {
     console.error('Transcription error:', error);
     errorResponse(res, 500, 'Failed to transcribe audio. Please try again.');
+  }
+});
+
+// ── POST /api/ai/generate-image ─────────────────────────────
+// Async image generation — called AFTER results are rendered
+router.post('/generate-image', async (req, res) => {
+  try {
+    const { title, description } = req.body;
+    if (!title) {
+      return errorResponse(res, 400, 'Title is required');
+    }
+    const imageUrl = await generateRecipeImage(title, description || '');
+    successResponse(res, { imageUrl });
+  } catch (error) {
+    console.error('Generate image error:', error);
+    successResponse(res, { imageUrl: DEFAULT_RECIPE_IMAGE });
   }
 });
 
