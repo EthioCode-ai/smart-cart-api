@@ -576,7 +576,7 @@ If mode is "recipe":
   "recipes": [{
     "title": "Recipe Name",
     "description": "Brief description",
-    "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat"}],
+    "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat", "price": 6.99}],
     "instructions": ["Step 1...", "Step 2..."],
     "prepTime": 25,
     "servings": 4,
@@ -593,7 +593,7 @@ If mode is "full_course":
     "courseType": "appetizer|main|side|dessert|beverage",
     "dishName": "Dish Name",
     "description": "Brief description",
-    "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat"}],
+    "ingredients": [{"item": "name", "quantity": "1", "unit": "lb", "category": "meat", "price": 5.99}],
     "prepTime": 30,
     "difficulty": "Easy|Medium|Hard"
   }],
@@ -611,7 +611,7 @@ If mode is "chat":
 }
 
 Important rules:
-- Always consider dietary restrictions and allergens
+- If the user has dietary restrictions, mention them but don't force them. Give classic recipes unless the user explicitly asks for alternatives.
 - Be specific with ingredient quantities
 - For recipes, include both the shopping list items AND the recipe details
 - For full course, include all courses (appetizer, main, side, dessert)
