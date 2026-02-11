@@ -91,8 +91,8 @@ router.put('/', async (req, res) => {
       `INSERT INTO user_settings (user_id, dietary_restrictions, allergens)
        VALUES ($1, $2, $3)
        ON CONFLICT (user_id) DO UPDATE SET
-         dietary_restrictions = COALESCE($2, user_settings.dietary_restrictions),
-         allergens = COALESCE($3, user_settings.allergens),
+         dietary_restrictions = $2,
+         allergens = $3,
          updated_at = NOW()
        RETURNING *`,
       [req.user.id, dietaryRestrictions, allergens]
