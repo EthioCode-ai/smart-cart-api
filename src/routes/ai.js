@@ -565,6 +565,7 @@ Respond in JSON with ONE of these structures based on your chosen mode:
 If mode is "shopping_list":
 {
   "mode": "shopping_list",
+  "listName": "A short, smart title for this shopping list (e.g. 'Weekly Groceries', 'Taco Night', 'BBQ Essentials'). Never use the user's raw command as the title. Summarize the intent in 2-4 words.",
   "suggestions": [{"item": "milk", "category": "dairy", "reason": "essential staple", "price": 3.49}],
   "message": "friendly summary"
 }
@@ -572,6 +573,7 @@ If mode is "shopping_list":
 If mode is "recipe":
 {
   "mode": "recipe",
+  "listName": "Short title for the ingredient list (e.g. 'Spaghetti Bolognese Ingredients')",
   "suggestions": [{"item": "ground beef", "category": "meat", "reason": "main protein", "price": 6.99}],
   "recipes": [{
     "title": "Recipe Name",
@@ -589,6 +591,7 @@ If mode is "recipe":
 If mode is "full_course":
 {
   "mode": "full_course",
+  "listName": "Short title for the meal (e.g. 'Steak Dinner for Two')",
   "courses": [{
     "courseType": "appetizer|main|side|dessert|beverage",
     "dishName": "Dish Name",
