@@ -95,7 +95,7 @@ const cacheGoogleStores = async (stores) => {
         [
           store.name, store.address, store.latitude, store.longitude,
           store.rating, store.photoReference, store.googlePlaceId,
-          store.isOpen, JSON.stringify(store.features),
+          store.isOpen, store.features || [],
         ]
       );
     } catch (err) {

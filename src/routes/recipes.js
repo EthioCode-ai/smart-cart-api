@@ -79,40 +79,36 @@ router.get('/', optionalAuth, async (req, res) => {
 
 router.get('/featured', optionalAuth, async (req, res) => {
   try {
+    // Return up to 5 most recently saved/created recipes for this user
     const result = await query(
       `SELECT r.*,
         CASE WHEN sr.id IS NOT NULL THEN true ELSE false END as is_saved
        FROM recipes r
        LEFT JOIN saved_recipes sr ON r.id = sr.recipe_id AND sr.user_id = $1
-       WHERE r.is_featured = true
-       ORDER BY r.rating DESC
-       LIMIT 1`,
+       WHERE r.created_by = $1 OR sr.user_id = $1
+       ORDER BY r.created_at DESC
+       LIMIT 5`,
       [req.user?.id || null]
     );
 
     if (result.rows.length === 0) {
-      // Return highest rated recipe if no featured
+      // No user recipes — return highest rated as suggestions
       const fallback = await query(
         `SELECT r.*,
           CASE WHEN sr.id IS NOT NULL THEN true ELSE false END as is_saved
          FROM recipes r
          LEFT JOIN saved_recipes sr ON r.id = sr.recipe_id AND sr.user_id = $1
          ORDER BY r.rating DESC
-         LIMIT 1`,
+         LIMIT 5`,
         [req.user?.id || null]
       );
-
-      if (fallback.rows.length === 0) {
-        return successResponse(res, { recipe: null });
-      }
-
-      return successResponse(res, { recipe: formatRecipe(fallback.rows[0]) });
+      return successResponse(res, { recipes: fallback.rows.map(formatRecipe) });
     }
 
-    successResponse(res, { recipe: formatRecipe(result.rows[0]) });
+    successResponse(res, { recipes: result.rows.map(formatRecipe) });
   } catch (error) {
-    console.error('Get featured recipe error:', error);
-    errorResponse(res, 500, 'Failed to fetch featured recipe');
+    console.error('Get featured recipes error:', error);
+    errorResponse(res, 500, 'Failed to fetch featured recipes');
   }
 });
 
