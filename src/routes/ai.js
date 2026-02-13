@@ -747,4 +747,48 @@ router.post('/generate-image', async (req, res) => {
   }
 });
 
+// ── POST /api/ai/price-items ────────────────────────────────
+// Lightweight endpoint to price and categorize items for list editing
+router.post('/price-items', async (req, res) => {
+  try {
+    const { items } = req.body;
+    if (!items || !items.length) {
+      return errorResponse(res, 400, 'Items array is required');
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: `You are a grocery pricing assistant. Given a list of item names, return a JSON array with each item's name, estimated US grocery store price in USD, and department category.
+Respond ONLY with JSON, no markdown or explanation:
+[{"name": "eggs", "price": 3.99, "department": "dairy"}, ...]
+Valid departments: dairy, bakery, produce, meat, seafood, frozen, beverages, snacks, pantry, household, other`
+        },
+        { role: 'user', content: items.join(', ') },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 500,
+      temperature: 0.3,
+    });
+
+    let result;
+    try {
+      const parsed = JSON.parse(completion.choices[0].message.content);
+      result = parsed.items || parsed;
+    } catch (e) {
+      result = items.map(name => ({ name, price: 2.99, department: 'grocery' }));
+    }
+
+    successResponse(res, { items: result });
+  } catch (error) {
+    console.error('Price items error:', error);
+    // Fallback — return items with default prices
+    successResponse(res, {
+      items: (req.body.items || []).map(name => ({ name, price: 2.99, department: 'grocery' })),
+    });
+  }
+});
+
 module.exports = router;
