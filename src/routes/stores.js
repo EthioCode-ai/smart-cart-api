@@ -51,19 +51,37 @@ const formatGooglePlace = (place) => ({
   isOpen: place.opening_hours?.open_now ?? null,
   isFavorite: false,
   favoriteNote: null,
-  distance: null, // Will be calculated on frontend
+ distance: null, // Calculated server-side in fetchGooglePlaces
   totalRatings: place.user_ratings_total || 0,
   priceLevel: place.price_level ?? null,
 });
 
-// ── Helper: Fetch from Google Places API ────────────────────
-const fetchGooglePlaces = async (lat, lng, radiusMeters = 10000, keyword = 'grocery store supermarket') => {
+// ── Helper: Haversine distance in km ──────────────────────────
+const haversineKm = (lat1, lon1, lat2, lon2) => {
+  const toRad = (deg) => deg * Math.PI / 180;
+  const R = 6371; // Earth's radius in km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+// ── Helper: Fetch from Google Places API ──────────────────────
+// Always fetches fresh results. No type= filter so keyword catches
+// supermarkets, grocery stores, discount grocers, ethnic markets, etc.
+const fetchGooglePlaces = async (originLat, originLng, radiusMeters = 25000, keyword = 'grocery store supermarket') => {
   if (!GOOGLE_MAPS_KEY) {
     console.warn('G_MAPS env variable not set — cannot fetch Google Places');
     return [];
   }
 
-  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radiusMeters}&type=supermarket&keyword=${encodeURIComponent(keyword)}&key=${GOOGLE_MAPS_KEY}`;
+  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json`
+    + `?location=${originLat},${originLng}`
+    + `&radius=${radiusMeters}`
+    + `&keyword=${encodeURIComponent(keyword)}`
+    + `&key=${GOOGLE_MAPS_KEY}`;
 
   try {
     const response = await fetch(url);
@@ -74,7 +92,19 @@ const fetchGooglePlaces = async (lat, lng, radiusMeters = 10000, keyword = 'groc
       return [];
     }
 
-    return (data.results || []).map(formatGooglePlace);
+    const results = data.results || [];
+
+    // Calculate server-side distance and attach to each store
+    const stores = results.map(place => {
+      const store = formatGooglePlace(place);
+      const distKm = haversineKm(originLat, originLng, store.latitude, store.longitude);
+      store.distance = Math.round(distKm * 100) / 100;
+      return store;
+    });
+
+    // Return sorted nearest-first
+    stores.sort((a, b) => a.distance - b.distance);
+    return stores;
   } catch (err) {
     console.error('Google Places fetch error:', err.message);
     return [];
@@ -108,7 +138,7 @@ const cacheGoogleStores = async (stores) => {
 // ── GET /api/stores/nearby ──────────────────────────────────
 router.get('/nearby', optionalAuth, async (req, res) => {
   try {
-    const { lat, lng, radius = 10 } = req.query;
+    const { lat, lng, radius = 25 } = req.query;
 
     if (!lat || !lng) {
       return errorResponse(res, 400, 'Latitude and longitude are required');
@@ -117,8 +147,19 @@ router.get('/nearby', optionalAuth, async (req, res) => {
     const latitude = parseFloat(lat);
     const longitude = parseFloat(lng);
     const radiusKm = parseFloat(radius);
+    const radiusMeters = Math.min(radiusKm * 1000, 50000); // Google max 50km
 
-    // Try local DB first
+    // Always fetch fresh from Google Places for real-time accuracy
+    const googleStores = await fetchGooglePlaces(latitude, longitude, radiusMeters);
+
+    if (googleStores.length > 0) {
+      // Cache in background for offline fallback — don't block response
+      cacheGoogleStores(googleStores).catch(() => {});
+      return successResponse(res, { stores: googleStores, source: 'google_places' });
+    }
+
+    // Fallback: local DB only when Google returns nothing (no API key, network issue, etc.)
+    console.warn('Google Places returned 0 results — falling back to local DB');
     const result = await query(
       `SELECT *,
         (6371 * acos(cos(radians($1)) * cos(radians(latitude)) *
@@ -134,25 +175,12 @@ router.get('/nearby', optionalAuth, async (req, res) => {
       [latitude, longitude, radiusKm]
     );
 
-    // If local DB has results, return them
-    if (result.rows.length > 0) {
-      const stores = result.rows.map(row => ({
-        ...formatStore(row),
-        distance: Math.round(parseFloat(row.distance) * 100) / 100,
-      }));
-      return successResponse(res, { stores, source: 'database' });
-    }
+    const stores = result.rows.map(row => ({
+      ...formatStore(row),
+      distance: Math.round(parseFloat(row.distance) * 100) / 100,
+    }));
 
-    // Otherwise, fetch from Google Places
-    const radiusMeters = Math.min(radiusKm * 1000, 50000); // Google max is 50km
-    const googleStores = await fetchGooglePlaces(latitude, longitude, radiusMeters);
-
-    // Cache results in background (don't await — don't block response)
-    if (googleStores.length > 0) {
-      cacheGoogleStores(googleStores).catch(() => {});
-    }
-
-    successResponse(res, { stores: googleStores, source: 'google_places' });
+    successResponse(res, { stores, source: 'database' });
   } catch (error) {
     console.error('Get nearby stores error:', error);
     errorResponse(res, 500, 'Failed to fetch nearby stores');
