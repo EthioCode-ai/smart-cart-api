@@ -787,8 +787,13 @@ Valid departments: dairy, bakery, produce, meat, seafood, frozen, beverages, sna
 
     let result;
     try {
-      const parsed = JSON.parse(completion.choices[0].message.content);
-      result = parsed.items || parsed;
+      const raw = completion.choices[0].message.content;
+      console.log('price-items GPT raw response:', raw);
+      const parsed = JSON.parse(raw);
+      result = Array.isArray(parsed) ? parsed
+        : parsed.items || parsed.data || parsed.results || Object.values(parsed).find(v => Array.isArray(v))
+        || [parsed];
+      console.log('price-items parsed result:', JSON.stringify(result));
     } catch (e) {
       result = items.map(name => ({ name, price: 2.99, department: 'grocery' }));
     }
