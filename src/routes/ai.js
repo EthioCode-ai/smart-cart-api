@@ -25,10 +25,22 @@ const DEFAULT_RECIPE_IMAGE = 'https://images.unsplash.com/photo-1495521821757-a1
 
 // ── Helper: Generate recipe image with DALL-E ───────────────
 
-const generateRecipeImage = async (recipeTitle, recipeDescription) => {
+const generateRecipeImage = async (recipeTitle, recipeDescription, keyIngredients) => {
   if (!openai || !recipeTitle) return DEFAULT_RECIPE_IMAGE;
   try {
-    const prompt = `A professional, appetizing food photography shot of ${recipeTitle}. ${recipeDescription || ''}. High quality, well-lit, restaurant-style plating, garnished beautifully, overhead view, vibrant colors, depth of field.`;
+    // Build ingredient context for accuracy
+    const ingredientText = keyIngredients && keyIngredients.length > 0
+      ? `Key visible ingredients: ${keyIngredients.slice(0, 8).join(', ')}.`
+      : '';
+
+    const prompt = [
+      `Hyper-realistic professional food photography of "${recipeTitle}".`,
+      recipeDescription ? `Description: ${recipeDescription}.` : '',
+      ingredientText,
+      `The image MUST accurately depict this specific dish — correct ingredients, authentic textures, proper colors, and traditional presentation.`,
+      `Style: shot on Canon EOS R5, 50mm f/1.8 lens, softbox lighting from upper left, shallow depth of field, clean white ceramic plate on marble countertop, steam rising, fresh herbs as garnish, editorial quality for a premium food magazine.`,
+      `Do NOT add any text, labels, watermarks, or words to the image.`,
+    ].filter(Boolean).join(' ');
 
     const response = await openai.images.generate({
       model: 'dall-e-3',
@@ -735,11 +747,11 @@ router.post('/transcribe', async (req, res) => {
 // Async image generation — called AFTER results are rendered
 router.post('/generate-image', async (req, res) => {
   try {
-    const { title, description } = req.body;
+    const { title, description, ingredients } = req.body;
     if (!title) {
       return errorResponse(res, 400, 'Title is required');
     }
-    const imageUrl = await generateRecipeImage(title, description || '');
+    const imageUrl = await generateRecipeImage(title, description || '', ingredients || []);
     successResponse(res, { imageUrl });
   } catch (error) {
     console.error('Generate image error:', error);
