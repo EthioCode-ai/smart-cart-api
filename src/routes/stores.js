@@ -509,4 +509,52 @@ router.get('/:id/directions', async (req, res) => {
   }
 });
 
+// ── POST /api/stores/register ─────────────────────────────
+// Register a Google Places store in the local DB (upsert by google_place_id)
+// Returns the real PostgreSQL store ID for use with store-layouts endpoints
+
+router.post('/register', optionalAuth, async (req, res) => {
+  try {
+    const { name, address, latitude, longitude, rating, photoReference, googlePlaceId, isOpen, features } = req.body;
+
+    if (!googlePlaceId || !name) {
+      return errorResponse(res, 400, 'Store name and Google Place ID are required');
+    }
+
+    const result = await query(
+      `INSERT INTO stores (name, address, latitude, longitude, rating, photo_reference, google_place_id, is_open, features)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (google_place_id) DO UPDATE SET
+         name = EXCLUDED.name,
+         address = EXCLUDED.address,
+         latitude = EXCLUDED.latitude,
+         longitude = EXCLUDED.longitude,
+         rating = EXCLUDED.rating,
+         photo_reference = EXCLUDED.photo_reference,
+         is_open = EXCLUDED.is_open,
+         updated_at = NOW()
+       RETURNING id, name, address, latitude, longitude, rating, google_place_id`,
+      [name, address, latitude, longitude, rating || 0, photoReference || null, googlePlaceId, isOpen || false, features || []]
+    );
+
+    const store = result.rows[0];
+
+    successResponse(res, {
+      store: {
+        id: store.id,
+        name: store.name,
+        address: store.address,
+        latitude: parseFloat(store.latitude),
+        longitude: parseFloat(store.longitude),
+        rating: parseFloat(store.rating) || 0,
+        googlePlaceId: store.google_place_id,
+      },
+    });
+  } catch (error) {
+    console.error('Register store error:', error);
+    errorResponse(res, 500, 'Failed to register store');
+  }
+});
+
+
 module.exports = router;
