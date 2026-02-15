@@ -133,6 +133,42 @@ router.post('/lookup', optionalAuth, async (req, res) => {
     const data = await response.json();
 
     if (data.status !== 1 || !data.product) {
+      // Fallback: try UPCitemdb (free trial, 100 lookups/day)
+      try {
+        const upcRes = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${cleanBarcode}`);
+        const upcData = await upcRes.json();
+
+        if (upcData.code === 'OK' && upcData.items && upcData.items.length > 0) {
+          const item = upcData.items[0];
+          const upcProduct = {
+            name: item.title || 'Unknown Product',
+            brand: item.brand || null,
+            category: mapCategory(item.category || ''),
+            price: item.lowest_recorded_price || 0,
+            barcode: cleanBarcode,
+            imageUrl: (item.images && item.images.length > 0) ? item.images[0] : null,
+          };
+
+          // Cache in local DB
+          query(
+            `INSERT INTO products (barcode, name, brand, category, price, image_url)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (barcode) DO UPDATE SET
+               name = EXCLUDED.name,
+               brand = EXCLUDED.brand,
+               category = EXCLUDED.category,
+               price = EXCLUDED.price,
+               image_url = EXCLUDED.image_url,
+               updated_at = NOW()`,
+            [cleanBarcode, upcProduct.name, upcProduct.brand, upcProduct.category, upcProduct.price, upcProduct.imageUrl]
+          ).catch(() => {});
+
+          return successResponse(res, { product: upcProduct, source: 'upcitemdb' });
+        }
+      } catch (upcErr) {
+        console.error('UPCitemdb fallback error:', upcErr);
+      }
+
       return successResponse(res, { product: null, message: 'Product not found' });
     }
 
