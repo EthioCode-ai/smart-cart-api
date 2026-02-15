@@ -43,6 +43,69 @@ router.post('/lookup', optionalAuth, async (req, res) => {
     // Clean barcode — strip whitespace
     const cleanBarcode = barcode.trim();
 
+    // ── Handle QR codes that contain URLs (e.g., Walmart, Target) ──
+    if (cleanBarcode.startsWith('http')) {
+      let productName = null;
+      let productId = null;
+      let brand = null;
+      let source = 'qr_url';
+
+      // Walmart: https://www.walmart.com/ip/Great-Value-Whole-Milk-1-Gallon/123456789
+      const walmartMatch = cleanBarcode.match(/walmart\.com\/ip\/([^/]+?)(?:\/(\d+))?(?:\?|$)/);
+      if (walmartMatch) {
+        const slug = walmartMatch[1];
+        productId = walmartMatch[2] || slug;
+        // Convert URL slug to readable name: "Great-Value-Whole-Milk" → "Great Value Whole Milk"
+        productName = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        source = 'walmart_qr';
+      }
+
+      // Target: https://www.target.com/p/product-name/-/A-12345678
+      const targetMatch = cleanBarcode.match(/target\.com\/p\/([^/]+)\/-\/A-(\d+)/);
+      if (targetMatch) {
+        productName = targetMatch[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        productId = targetMatch[2];
+        source = 'target_qr';
+      }
+
+      // Sam's Club: https://www.samsclub.com/p/product-name/prod12345678
+      const samsMatch = cleanBarcode.match(/samsclub\.com\/p\/([^/]+)\/(\w+)/);
+      if (samsMatch) {
+        productName = samsMatch[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        productId = samsMatch[2];
+        source = 'samsclub_qr';
+      }
+
+      // Kroger: https://www.kroger.com/p/product-name/0001234567890
+      const krogerMatch = cleanBarcode.match(/kroger\.com\/p\/([^/]+)\/(\d+)/);
+      if (krogerMatch) {
+        productName = krogerMatch[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        productId = krogerMatch[2];
+        source = 'kroger_qr';
+      }
+
+      if (productName) {
+        return successResponse(res, {
+          product: {
+            name: productName,
+            brand: null,
+            category: 'grocery',
+            price: 0,
+            barcode: productId || cleanBarcode,
+            imageUrl: null,
+          },
+          source,
+        });
+      }
+
+      // Unknown URL — return what we can
+      return successResponse(res, {
+        product: null,
+        message: 'Unrecognized QR code URL',
+        url: cleanBarcode,
+      });
+    }
+
     // Check local cache first
     const cached = await query(
       'SELECT * FROM products WHERE barcode = $1',
