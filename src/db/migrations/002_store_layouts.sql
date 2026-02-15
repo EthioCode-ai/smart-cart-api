@@ -8,8 +8,8 @@
 CREATE TABLE IF NOT EXISTS store_entrances (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id UUID NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
-    entrance_type VARCHAR(20) NOT NULL DEFAULT 'main'
-        CHECK (entrance_type IN ('main', 'side', 'back', 'pharmacy', 'garden')),
+    entrance_type VARCHAR(30) NOT NULL DEFAULT 'main'
+        CHECK (entrance_type IN ('main', 'side', 'back', 'pharmacy', 'garden', 'restrooms', 'cash_registers', 'self_checkout', 'customer_service', 'deli_counter', 'bakery_counter', 'returns_desk', 'atm', 'photo_center', 'floral', 'garden_center', 'main_entrance', 'side_entrance')),
     position_description VARCHAR(255),
     latitude DECIMAL(10, 7),
     longitude DECIMAL(10, 7),
