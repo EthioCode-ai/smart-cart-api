@@ -266,7 +266,21 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/:id/items', async (req, res) => {
   try {
-    const { name, price, quantity, unit, department, notes } = req.body;
+    const { name, price, unit, department, notes } = req.body;
+    // Parse fractional quantities: "1/2" → 0.5, "1 1/2" → 1.5, "3" → 3
+    let quantity = req.body.quantity;
+    if (typeof quantity === 'string') {
+      const fracMatch = quantity.match(/^(\d+)?\s*(\d+)\/(\d+)$/);
+      if (fracMatch) {
+        const whole = parseInt(fracMatch[1] || '0');
+        const num = parseInt(fracMatch[2]);
+        const den = parseInt(fracMatch[3]);
+        quantity = den > 0 ? whole + (num / den) : 1;
+      } else {
+        quantity = parseFloat(quantity) || 1;
+      }
+    }
+    quantity = quantity || 1;
 
     if (!name || !name.trim()) {
       return errorResponse(res, 400, 'Item name is required');
