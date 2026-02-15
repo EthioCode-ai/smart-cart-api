@@ -246,17 +246,33 @@ router.post('/lookup', optionalAuth, async (req, res) => {
       },
     };
 
+    // Supplement with UPCitemdb for price data
+    if (!product.price || product.price === 0) {
+      try {
+        const upcRes = await fetch(`https://api.upcitemdb.com/prod/trial/lookup?upc=${cleanBarcode}`);
+        const upcData = await upcRes.json();
+        if (upcData.code === 'OK' && upcData.items && upcData.items.length > 0) {
+          const item = upcData.items[0];
+          if (item.lowest_recorded_price) product.price = item.lowest_recorded_price;
+          if (!product.imageUrl && item.images && item.images.length > 0) product.imageUrl = item.images[0];
+        }
+      } catch (upcErr) {
+        // UPCitemdb supplement failed, continue without price
+      }
+    }
+
     // Cache in local DB (non-blocking)
     query(
-      `INSERT INTO products (barcode, name, brand, category, image_url, nutrition)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO products (barcode, name, brand, category, price, image_url, nutrition)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (barcode) DO UPDATE SET
          name = EXCLUDED.name,
          brand = EXCLUDED.brand,
          category = EXCLUDED.category,
-         image_url = EXCLUDED.image_url,
+         price = COALESCE(NULLIF(EXCLUDED.price, 0), products.price),
+         image_url = COALESCE(EXCLUDED.image_url, products.image_url),
          updated_at = NOW()`,
-      [cleanBarcode, product.name, brand, category, imageUrl, JSON.stringify(product.nutrition)]
+      [cleanBarcode, product.name, brand, category, product.price, product.imageUrl || imageUrl, JSON.stringify(product.nutrition)]
     ).catch(() => {}); // Don't fail if cache write fails
 
     successResponse(res, { product, source: 'open_food_facts' });
