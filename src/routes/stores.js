@@ -523,12 +523,12 @@ router.post('/register', optionalAuth, async (req, res) => {
 
     const result = await query(
       `INSERT INTO stores (name, address, latitude, longitude, rating, photo_reference, google_place_id, is_open, features)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       VALUES ($1, $2, $3::FLOAT, $4::FLOAT, $5::FLOAT, $6, $7, $8::BOOLEAN, $9)
        ON CONFLICT (google_place_id) DO UPDATE SET
          name = EXCLUDED.name,
          address = EXCLUDED.address,
-         latitude = EXCLUDED.latitude,
-         longitude = EXCLUDED.longitude,
+         latitude = $3::FLOAT,
+         longitude = $4::FLOAT,
          rating = EXCLUDED.rating,
          photo_reference = EXCLUDED.photo_reference,
          is_open = EXCLUDED.is_open,
