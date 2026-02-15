@@ -493,7 +493,9 @@ router.post('/:storeId/aisles', async (req, res) => {
 router.post('/:storeId/aisles/scan', async (req, res) => {
   try {
     const { storeId } = req.params;
-    const { aisleNumber, ocrText, ocrConfidence, imageUrl } = req.body;
+    const { aisleNumber, ocrConfidence, imageUrl } = req.body;
+    // Truncate OCR text to fit VARCHAR(255) column
+    const ocrText = (req.body.ocrText || '').substring(0, 250);
 
     if (!aisleNumber || !ocrText) {
       return errorResponse(res, 400, 'Aisle number and OCR text are required');
