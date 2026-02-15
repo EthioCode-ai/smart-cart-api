@@ -50,31 +50,50 @@ router.post('/lookup', optionalAuth, async (req, res) => {
       let productName = null;
       let productId = null;
       let brand = null;
+      let productPrice = 0;
+      let productImage = null;
       let source = 'qr_url';
 
-      // Walmart shortened URLs: w-mt.co/q/... → follow redirect, fetch page title
+      // Walmart shortened URLs: w-mt.co/q/... → follow redirect to get product ID
       if (fullUrl.includes('w-mt.co') || fullUrl.includes('wmt.co')) {
         try {
-          const pageRes = await fetch(fullUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' },
-          });
-          const html = await pageRes.text();
+          const redirectRes = await fetch(fullUrl, { redirect: 'manual' });
+          const redirectUrl = redirectRes.headers.get('location') || '';
 
-          // Extract product name from <title> tag: "Product Name - Walmart.com"
-          const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-          if (titleMatch) {
-            let title = titleMatch[1].replace(/\s*[-–|]?\s*Walmart\.com\s*/gi, '').trim();
-            if (title && title.length > 2 && title.toLowerCase() !== 'walmart') {
-              productName = title;
+          // Extract Walmart product ID from redirect URL
+          const idMatch = redirectUrl.match(/\/ip\/[^/]*?\/(\d+)/);
+          if (idMatch) {
+            productId = idMatch[1];
+
+            // Try UPCitemdb search by Walmart product ID
+            try {
+              const searchRes = await fetch(`https://api.upcitemdb.com/prod/trial/search?s=${productId}&type=product`);
+              const searchData = await searchRes.json();
+              if (searchData.items && searchData.items.length > 0) {
+                const item = searchData.items[0];
+                productName = item.title;
+                brand = item.brand || null;
+                productPrice = item.lowest_recorded_price || 0;
+                productImage = (item.images && item.images.length > 0) ? item.images[0] : null;
+                source = 'walmart_qr';
+              }
+            } catch (searchErr) {
+              // UPCitemdb search failed
+            }
+
+            // If UPCitemdb didn't find it, use the URL slug as fallback
+            if (!productName) {
+              const slugMatch = redirectUrl.match(/\/ip\/([^/?]+)/);
+              if (slugMatch && slugMatch[1].length > 3 && slugMatch[1] !== 'seort') {
+                productName = slugMatch[1].replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+              } else {
+                productName = `Walmart Product #${productId}`;
+              }
               source = 'walmart_qr';
             }
           }
-
-          // Extract Walmart product ID from final URL
-          const idMatch = (pageRes.url || fullUrl).match(/\/ip\/[^/]*?\/(\d+)/);
-          if (idMatch) productId = idMatch[1];
         } catch (redirErr) {
-          console.error('Walmart QR fetch error:', redirErr);
+          console.error('Walmart QR error:', redirErr);
         }
       }
 
@@ -117,11 +136,11 @@ router.post('/lookup', optionalAuth, async (req, res) => {
         return successResponse(res, {
           product: {
             name: productName,
-            brand: null,
+            brand: brand,
             category: 'grocery',
-            price: 0,
+            price: productPrice,
             barcode: productId || cleanBarcode,
-            imageUrl: null,
+            imageUrl: productImage,
           },
           source,
         });
