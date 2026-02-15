@@ -50,6 +50,28 @@ router.post('/lookup', optionalAuth, async (req, res) => {
       let brand = null;
       let source = 'qr_url';
 
+      // Walmart shortened URLs: w-mt.co/q/... → follow redirect to get real URL
+      if (cleanBarcode.includes('w-mt.co') || cleanBarcode.includes('wmt.co')) {
+        try {
+          const redirectRes = await fetch(cleanBarcode.startsWith('http') ? cleanBarcode : `https://${cleanBarcode}`, {
+            redirect: 'manual',
+          });
+          const redirectUrl = redirectRes.headers.get('location');
+          if (redirectUrl && redirectUrl.includes('walmart.com')) {
+            const slugMatch = redirectUrl.match(/\/ip\/([^/]+?)(?:\/(\d+))?(?:\?|$)/);
+            if (slugMatch) {
+              const slug = slugMatch[1];
+              productName = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+              productId = slugMatch[2] || slug;
+              source = 'walmart_qr';
+            }
+          }
+        } catch (redirErr) {
+          console.error('Walmart redirect error:', redirErr);
+        }
+      }
+
+   
       // Walmart: https://www.walmart.com/ip/Great-Value-Whole-Milk-1-Gallon/123456789
       const walmartMatch = cleanBarcode.match(/walmart\.com\/ip\/([^/]+?)(?:\/(\d+))?(?:\?|$)/);
       if (walmartMatch) {
