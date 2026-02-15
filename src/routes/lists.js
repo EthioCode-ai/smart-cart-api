@@ -266,7 +266,7 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/:id/items', async (req, res) => {
   try {
-    const { name, price, unit, department, notes } = req.body;
+    const { name, price, unit, department, notes, barcode } = req.body;
     // Parse fractional quantities: "1/2" → 0.5, "1 1/2" → 1.5, "3" → 3
     let quantity = req.body.quantity;
     if (typeof quantity === 'string') {
@@ -299,10 +299,10 @@ router.post('/:id/items', async (req, res) => {
     }
 
     const result = await query(
-      `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, added_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, barcode, added_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [req.params.id, name.trim(), price || 0, quantity || 1, unit || null, department, notes || null, req.user.id]
+      [req.params.id, name.trim(), price || 0, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id]
     );
 
     // Update list timestamp
@@ -617,6 +617,110 @@ router.get('/:id/cost', async (req, res) => {
   } catch (error) {
     console.error('Get cost error:', error);
     errorResponse(res, 500, 'Failed to calculate cost');
+  }
+});
+
+// ── GET /api/lists/:id/compare-prices ──────────────────────
+// Compare cart total across stores using crowdsourced prices
+router.get('/:id/compare-prices', async (req, res) => {
+  try {
+    const listId = req.params.id;
+
+    // Get list items with barcodes
+    const items = await query(
+      `SELECT name, barcode, price, quantity FROM list_items 
+       WHERE list_id = $1 AND checked = false`,
+      [listId]
+    );
+
+    if (items.rows.length === 0) {
+      return successResponse(res, { comparisons: [], message: 'No items in list' });
+    }
+
+    const barcodes = items.rows.filter(i => i.barcode).map(i => i.barcode);
+    const itemsWithoutBarcode = items.rows.filter(i => !i.barcode);
+
+    if (barcodes.length === 0) {
+      return successResponse(res, { 
+        comparisons: [], 
+        message: 'No scanned products to compare. Scan barcodes to enable price comparison.',
+        totalItems: items.rows.length,
+        scannedItems: 0,
+      });
+    }
+
+    // Get all store prices for these barcodes
+    const storePrices = await query(
+      `SELECT sp.store_id, sp.barcode, sp.price, sp.regular_price,
+              s.name as store_name, s.address as store_address,
+              s.latitude, s.longitude
+       FROM store_prices sp
+       JOIN stores s ON sp.store_id = s.id
+       WHERE sp.barcode = ANY($1)
+       ORDER BY s.name`,
+      [barcodes]
+    );
+
+    // Group by store
+    const storeMap = {};
+    for (const row of storePrices.rows) {
+      if (!storeMap[row.store_id]) {
+        storeMap[row.store_id] = {
+          storeId: row.store_id,
+          storeName: row.store_name,
+          storeAddress: row.store_address,
+          latitude: parseFloat(row.latitude),
+          longitude: parseFloat(row.longitude),
+          items: [],
+          total: 0,
+          matchedCount: 0,
+        };
+      }
+
+      const listItem = items.rows.find(i => i.barcode === row.barcode);
+      const qty = parseFloat(listItem?.quantity) || 1;
+      const lineTotal = parseFloat(row.price) * qty;
+
+      storeMap[row.store_id].items.push({
+        name: listItem?.name || row.barcode,
+        barcode: row.barcode,
+        price: parseFloat(row.price),
+        regularPrice: row.regular_price ? parseFloat(row.regular_price) : null,
+        quantity: qty,
+        lineTotal,
+      });
+      storeMap[row.store_id].total += lineTotal;
+      storeMap[row.store_id].matchedCount++;
+    }
+
+    // Add unmatched items cost (use list price as fallback)
+    const unmatchedTotal = items.rows
+      .filter(i => !i.barcode || !barcodes.includes(i.barcode))
+      .reduce((sum, i) => sum + (parseFloat(i.price) || 0) * (parseFloat(i.quantity) || 1), 0);
+
+    // Convert to array and sort by total (cheapest first)
+    const comparisons = Object.values(storeMap)
+      .map(store => ({
+        ...store,
+        total: Math.round((store.total + unmatchedTotal) * 100) / 100,
+        unmatchedItemsCost: Math.round(unmatchedTotal * 100) / 100,
+      }))
+      .sort((a, b) => a.total - b.total);
+
+    // Calculate savings vs most expensive
+    const cheapest = comparisons[0]?.total || 0;
+    const mostExpensive = comparisons[comparisons.length - 1]?.total || 0;
+
+    successResponse(res, {
+      comparisons,
+      totalItems: items.rows.length,
+      scannedItems: barcodes.length,
+      manualItems: itemsWithoutBarcode.length,
+      maxSavings: Math.round((mostExpensive - cheapest) * 100) / 100,
+    });
+  } catch (error) {
+    console.error('Compare prices error:', error);
+    errorResponse(res, 500, 'Failed to compare prices');
   }
 });
 
