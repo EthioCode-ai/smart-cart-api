@@ -7,6 +7,37 @@ const { query, successResponse, errorResponse } = require('../models/db');
 const { optionalAuth } = require('../middleware/auth');
 const router = express.Router();
 
+// ── Cloudinary Setup ─────────────────────────────────────────
+const cloudinary = require('cloudinary').v2;
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const uploadToCloudinary = async (base64Image, barcode) => {
+  try {
+    if (!process.env.CLOUDINARY_CLOUD_NAME) {
+      console.warn('Cloudinary not configured — skipping image upload');
+      return null;
+    }
+    const result = await cloudinary.uploader.upload(
+      `data:image/jpeg;base64,${base64Image}`,
+      {
+        folder: 'smart-cart/products',
+        public_id: `product_${barcode}_${Date.now()}`,
+        transformation: [
+          { width: 400, height: 400, crop: 'limit', quality: 'auto:good', format: 'webp' }
+        ],
+      }
+    );
+    return result.secure_url;
+  } catch (err) {
+    console.error('Cloudinary upload error:', err.message);
+    return null;
+  }
+};
+
 // ── Category mapping from Open Food Facts tags ─────────────
 const mapCategory = (categories) => {
   if (!categories) return 'grocery';
@@ -390,18 +421,19 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
     let pricesUpdated = 0;
 
     for (const product of products) {
-      const { barcode, name, price, regularPrice, source } = product;
+      const { barcode, name, price, regularPrice, source, imageUrl } = product;
       if (!barcode) continue;
 
       try {
         await query(
           `INSERT INTO products (barcode, name, brand, category, price, image_url)
-           VALUES ($1, $2, NULL, 'grocery', $3, NULL)
+           VALUES ($1, $2, NULL, 'grocery', $3, $4)
            ON CONFLICT (barcode) DO UPDATE SET
              name = COALESCE(NULLIF($2, ''), products.name),
              price = CASE WHEN $3 > 0 THEN $3 ELSE products.price END,
+             image_url = COALESCE(NULLIF($4, ''), products.image_url),
              updated_at = NOW()`,
-          [barcode, name || null, price || 0]
+          [barcode, name || null, price || 0, imageUrl || null]
         );
         saved++;
         if (price > 0) pricesUpdated++;
@@ -435,6 +467,36 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
   } catch (error) {
     console.error('Batch price error:', error);
     errorResponse(res, 500, 'Failed to save batch prices');
+  }
+});
+
+// ── POST /api/products/upload-image ─────────────────────────
+// Upload a product photo captured during Walk & Scan
+router.post('/upload-image', optionalAuth, async (req, res) => {
+  try {
+    const { barcode, imageBase64 } = req.body;
+
+    if (!barcode || !imageBase64) {
+      return errorResponse(res, 400, 'Barcode and imageBase64 are required');
+    }
+
+    const imageUrl = await uploadToCloudinary(imageBase64, barcode);
+
+    if (!imageUrl) {
+      return errorResponse(res, 500, 'Image upload failed');
+    }
+
+    // Update products table with the new image
+    await query(
+      `UPDATE products SET image_url = $1, updated_at = NOW()
+       WHERE barcode = $2 AND (image_url IS NULL OR image_url = '')`,
+      [imageUrl, barcode]
+    );
+
+    successResponse(res, { imageUrl, barcode });
+  } catch (error) {
+    console.error('Upload image error:', error);
+    errorResponse(res, 500, 'Failed to upload image');
   }
 });
 
