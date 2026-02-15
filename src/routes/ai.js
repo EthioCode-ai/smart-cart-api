@@ -798,6 +798,33 @@ Valid departments: dairy, bakery, produce, meat, seafood, frozen, beverages, sna
       result = items.map(name => ({ name, price: 2.99, department: 'grocery' }));
     }
 
+    // Fuzzy match typed items against products DB to attach barcodes
+    try {
+      for (let i = 0; i < result.length; i++) {
+        const item = result[i];
+        if (!item.barcode && item.name) {
+          // Search products table for a name match
+          const match = await query(
+            `SELECT barcode, name, price FROM products 
+             WHERE barcode IS NOT NULL 
+               AND LOWER(name) LIKE $1
+             ORDER BY updated_at DESC LIMIT 1`,
+            [`%${item.name.toLowerCase()}%`]
+          );
+          if (match.rows.length > 0) {
+            item.barcode = match.rows[0].barcode;
+            // Use DB price if GPT estimate seems off or if DB has real data
+            if (match.rows[0].price && parseFloat(match.rows[0].price) > 0) {
+              item.price = parseFloat(match.rows[0].price);
+            }
+            console.log(`Matched "${item.name}" → barcode ${item.barcode} ($${item.price})`);
+          }
+        }
+      }
+    } catch (matchErr) {
+      console.error('Barcode matching error (non-fatal):', matchErr.message);
+    }
+
     successResponse(res, { items: result });
   } catch (error) {
     console.error('Price items error:', error);
