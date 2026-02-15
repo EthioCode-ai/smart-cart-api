@@ -154,11 +154,44 @@ router.post('/lookup', optionalAuth, async (req, res) => {
       });
     }
 
-    // Check local cache first
+    // Check local cache first, supplement with store-specific crowdsourced prices
     const cached = await query(
       'SELECT * FROM products WHERE barcode = $1',
       [cleanBarcode]
     );
+
+    // Get store-specific price (prefer same store, fallback to any store)
+    const storeId = req.body.storeId || null;
+    let storeSpecificPrice = null;
+    try {
+      if (storeId) {
+        // First: exact store match
+        const exactMatch = await query(
+          'SELECT price, regular_price FROM store_prices WHERE barcode = $1 AND store_id = $2',
+          [cleanBarcode, storeId]
+        );
+        if (exactMatch.rows.length > 0) {
+          storeSpecificPrice = exactMatch.rows[0];
+        }
+      }
+      // Fallback: most recent price from any store
+      if (!storeSpecificPrice) {
+        const anyStore = await query(
+          'SELECT price, regular_price FROM store_prices WHERE barcode = $1 ORDER BY updated_at DESC LIMIT 1',
+          [cleanBarcode]
+        );
+        if (anyStore.rows.length > 0) {
+          storeSpecificPrice = anyStore.rows[0];
+        }
+      }
+    } catch (spErr) {
+      // store_prices check failed, continue
+    }
+
+    // Apply crowdsourced price to cached product
+    if (cached.rows.length > 0 && storeSpecificPrice) {
+      cached.rows[0].price = storeSpecificPrice.price;
+    }
 
     if (cached.rows.length > 0) {
       const row = cached.rows[0];
@@ -211,6 +244,19 @@ router.post('/lookup', optionalAuth, async (req, res) => {
             [cleanBarcode, upcProduct.name, upcProduct.brand, upcProduct.category, upcProduct.price, upcProduct.imageUrl]
           ).catch(() => {});
 
+          // Save to store_prices if store context exists
+          if (storeId && upcProduct.price > 0) {
+            query(
+              `INSERT INTO store_prices (store_id, barcode, price, source, scanned_by)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (store_id, barcode) DO UPDATE SET
+                 price = CASE WHEN $3 <> store_prices.price THEN $3 ELSE store_prices.price END,
+                 source = $4,
+                 scanned_by = $5,
+                 updated_at = NOW()`,
+              [storeId, cleanBarcode, upcProduct.price, 'barcode_scan', req.user?.id || null]
+            ).catch(() => {});
+          }
           return successResponse(res, { product: upcProduct, source: 'upcitemdb' });
         }
       } catch (upcErr) {
@@ -274,6 +320,25 @@ router.post('/lookup', optionalAuth, async (req, res) => {
          updated_at = NOW()`,
       [cleanBarcode, product.name, brand, category, product.price, product.imageUrl || imageUrl, JSON.stringify(product.nutrition)]
     ).catch(() => {}); // Don't fail if cache write fails
+
+   // Apply crowdsourced store price if API didn't return one
+    if ((!product.price || product.price === 0) && storeSpecificPrice) {
+      product.price = parseFloat(storeSpecificPrice.price);
+    }
+
+    // Save to store_prices if we have a store context and any price
+    if (storeId && product.price > 0) {
+      query(
+        `INSERT INTO store_prices (store_id, barcode, price, source, scanned_by)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (store_id, barcode) DO UPDATE SET
+           price = CASE WHEN $3 <> store_prices.price THEN $3 ELSE store_prices.price END,
+           source = $4,
+           scanned_by = $5,
+           updated_at = NOW()`,
+        [storeId, cleanBarcode, product.price, 'barcode_scan', req.user?.id || null]
+      ).catch(() => {});
+    }
 
     successResponse(res, { product, source: 'open_food_facts' });
   } catch (error) {
