@@ -311,4 +311,66 @@ router.get('/search', optionalAuth, async (req, res) => {
   }
 });
 
+// ── POST /api/products/batch-price ─────────────────────────
+// Batch save scanned products with prices from Walk & Scan
+router.post('/batch-price', optionalAuth, async (req, res) => {
+  try {
+    const { storeId, aisleNumber, products } = req.body;
+
+    if (!products || !Array.isArray(products) || products.length === 0) {
+      return errorResponse(res, 400, 'Products array is required');
+    }
+
+    let saved = 0;
+    let pricesUpdated = 0;
+
+    for (const product of products) {
+      const { barcode, name, price, regularPrice, source } = product;
+      if (!barcode) continue;
+
+      try {
+        await query(
+          `INSERT INTO products (barcode, name, brand, category, price, image_url)
+           VALUES ($1, $2, NULL, 'grocery', $3, NULL)
+           ON CONFLICT (barcode) DO UPDATE SET
+             name = COALESCE(NULLIF($2, ''), products.name),
+             price = CASE WHEN $3 > 0 THEN $3 ELSE products.price END,
+             updated_at = NOW()`,
+          [barcode, name || null, price || 0]
+        );
+        saved++;
+        if (price > 0) pricesUpdated++;
+      } catch (insertErr) {
+        console.error(`Batch insert error for ${barcode}:`, insertErr.message);
+      }
+
+      if (storeId && price > 0) {
+        try {
+          await query(
+            `INSERT INTO store_prices (store_id, barcode, price, regular_price, aisle_number, source, scanned_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (store_id, barcode) DO UPDATE SET
+               price = $3,
+               regular_price = COALESCE($4, store_prices.regular_price),
+               aisle_number = COALESCE($5, store_prices.aisle_number),
+               source = $6,
+               scanned_by = $7,
+               updated_at = NOW()`,
+            [storeId, barcode, price, regularPrice || null, aisleNumber || null, source || 'walk_scan', req.user?.id || null]
+          );
+        } catch (priceErr) {
+          if (priceErr.code !== '42P01') {
+            console.error(`Store price insert error for ${barcode}:`, priceErr.message);
+          }
+        }
+      }
+    }
+
+    successResponse(res, { saved, pricesUpdated, total: products.length });
+  } catch (error) {
+    console.error('Batch price error:', error);
+    errorResponse(res, 500, 'Failed to save batch prices');
+  }
+});
+
 module.exports = router;
