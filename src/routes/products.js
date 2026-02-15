@@ -44,7 +44,9 @@ router.post('/lookup', optionalAuth, async (req, res) => {
     const cleanBarcode = barcode.trim();
 
     // ── Handle QR codes that contain URLs (e.g., Walmart, Target) ──
-    if (cleanBarcode.startsWith('http')) {
+    const isUrl = cleanBarcode.startsWith('http') || cleanBarcode.includes('w-mt.co') || cleanBarcode.includes('wmt.co') || cleanBarcode.includes('walmart.com') || cleanBarcode.includes('target.com') || cleanBarcode.includes('samsclub.com') || cleanBarcode.includes('kroger.com');
+    if (isUrl) {
+      const fullUrl = cleanBarcode.startsWith('http') ? cleanBarcode : `https://${cleanBarcode}`;
       let productName = null;
       let productId = null;
       let brand = null;
@@ -53,7 +55,7 @@ router.post('/lookup', optionalAuth, async (req, res) => {
       // Walmart shortened URLs: w-mt.co/q/... → follow redirect to get real URL
       if (cleanBarcode.includes('w-mt.co') || cleanBarcode.includes('wmt.co')) {
         try {
-          const redirectRes = await fetch(cleanBarcode.startsWith('http') ? cleanBarcode : `https://${cleanBarcode}`, {
+          const redirectRes = await fetch(fullUrl, {
             redirect: 'manual',
           });
           const redirectUrl = redirectRes.headers.get('location');
