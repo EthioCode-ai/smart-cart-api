@@ -52,24 +52,29 @@ router.post('/lookup', optionalAuth, async (req, res) => {
       let brand = null;
       let source = 'qr_url';
 
-      // Walmart shortened URLs: w-mt.co/q/... → follow redirect to get real URL
-      if (cleanBarcode.includes('w-mt.co') || cleanBarcode.includes('wmt.co')) {
+      // Walmart shortened URLs: w-mt.co/q/... → follow redirect, fetch page title
+      if (fullUrl.includes('w-mt.co') || fullUrl.includes('wmt.co')) {
         try {
-          const redirectRes = await fetch(fullUrl, {
-            redirect: 'manual',
+          const pageRes = await fetch(fullUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36' },
           });
-          const redirectUrl = redirectRes.headers.get('location');
-          if (redirectUrl && redirectUrl.includes('walmart.com')) {
-            const slugMatch = redirectUrl.match(/\/ip\/([^/]+?)(?:\/(\d+))?(?:\?|$)/);
-            if (slugMatch) {
-              const slug = slugMatch[1];
-              productName = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-              productId = slugMatch[2] || slug;
+          const html = await pageRes.text();
+
+          // Extract product name from <title> tag: "Product Name - Walmart.com"
+          const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+          if (titleMatch) {
+            let title = titleMatch[1].replace(/\s*[-–|]?\s*Walmart\.com\s*/gi, '').trim();
+            if (title && title.length > 2 && title.toLowerCase() !== 'walmart') {
+              productName = title;
               source = 'walmart_qr';
             }
           }
+
+          // Extract Walmart product ID from final URL
+          const idMatch = (pageRes.url || fullUrl).match(/\/ip\/[^/]*?\/(\d+)/);
+          if (idMatch) productId = idMatch[1];
         } catch (redirErr) {
-          console.error('Walmart redirect error:', redirErr);
+          console.error('Walmart QR fetch error:', redirErr);
         }
       }
 
