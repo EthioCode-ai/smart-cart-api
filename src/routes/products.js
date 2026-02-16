@@ -234,6 +234,9 @@ router.post('/lookup', optionalAuth, async (req, res) => {
           price: parseFloat(row.price) || 0,
           barcode: row.barcode,
           imageUrl: row.image_url,
+          ingredients: row.ingredients || null,
+          allergens: row.allergens || [],
+          dietaryTags: row.dietary_tags || [],
         },
         source: 'cache',
       });
@@ -305,14 +308,54 @@ router.post('/lookup', optionalAuth, async (req, res) => {
     const imageUrl = p.image_front_url || p.image_url || null;
     const quantity = p.quantity || null;
 
+    // ── Extract ingredients & allergens from Open Food Facts ──
+    const ingredients = p.ingredients_text || p.ingredients_text_en || null;
+
+    // Parse allergens from tags: ["en:milk", "en:gluten"] → ["dairy", "wheat"]
+    const allergenMap = {
+      'milk': 'dairy', 'lactose': 'dairy',
+      'eggs': 'eggs', 'egg': 'eggs',
+      'peanuts': 'peanuts', 'peanut': 'peanuts',
+      'nuts': 'tree nuts', 'tree-nuts': 'tree nuts', 'almonds': 'tree nuts', 'cashews': 'tree nuts', 'walnuts': 'tree nuts', 'pecans': 'tree nuts',
+      'wheat': 'wheat', 'gluten': 'wheat',
+      'soybeans': 'soy', 'soy': 'soy', 'soya': 'soy',
+      'fish': 'fish',
+      'shellfish': 'shellfish', 'crustaceans': 'shellfish', 'shrimp': 'shellfish',
+      'sesame': 'sesame', 'sesame-seeds': 'sesame',
+    };
+    const rawAllergens = [
+      ...(p.allergens_tags || []),
+      ...(p.traces_tags || []),
+    ].map(tag => tag.replace('en:', '').toLowerCase());
+    const allergens = [...new Set(
+      rawAllergens.map(a => allergenMap[a] || null).filter(Boolean)
+    )];
+
+    // Parse dietary tags from labels: ["en:organic", "en:vegan"] → ["organic", "vegan"]
+    const dietaryMap = {
+      'organic': 'organic', 'vegan': 'vegan', 'vegetarian': 'vegetarian',
+      'gluten-free': 'gluten-free', 'kosher': 'kosher', 'halal': 'halal',
+      'sugar-free': 'sugar-free', 'no-sugar-added': 'sugar-free',
+      'lactose-free': 'lactose-free', 'dairy-free': 'dairy-free',
+      'keto': 'keto', 'paleo': 'paleo', 'low-sodium': 'low-sodium',
+      'no-gluten': 'gluten-free', 'sans-gluten': 'gluten-free',
+    };
+    const rawLabels = (p.labels_tags || []).map(tag => tag.replace('en:', '').toLowerCase());
+    const dietaryTags = [...new Set(
+      rawLabels.map(l => dietaryMap[l] || null).filter(Boolean)
+    )];
+
     const product = {
       name: brand ? `${brand} ${productName}` : productName,
       brand: brand,
       category: category,
-      price: 0, // Open Food Facts doesn't have price data
+      price: 0,
       barcode: cleanBarcode,
       imageUrl: imageUrl,
       quantity: quantity,
+      ingredients: ingredients,
+      allergens: allergens,
+      dietaryTags: dietaryTags,
       nutrition: {
         calories: p.nutriments?.['energy-kcal_100g'] || null,
         fat: p.nutriments?.fat_100g || null,
@@ -340,17 +383,20 @@ router.post('/lookup', optionalAuth, async (req, res) => {
 
     // Cache in local DB (non-blocking)
     query(
-      `INSERT INTO products (barcode, name, brand, category, price, image_url, nutrition)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO products (barcode, name, brand, category, price, image_url, nutrition, ingredients, allergens, dietary_tags)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (barcode) DO UPDATE SET
          name = EXCLUDED.name,
          brand = EXCLUDED.brand,
          category = EXCLUDED.category,
          price = COALESCE(NULLIF(EXCLUDED.price, 0), products.price),
          image_url = COALESCE(EXCLUDED.image_url, products.image_url),
+         ingredients = COALESCE(EXCLUDED.ingredients, products.ingredients),
+         allergens = COALESCE(EXCLUDED.allergens, products.allergens),
+         dietary_tags = COALESCE(EXCLUDED.dietary_tags, products.dietary_tags),
          updated_at = NOW()`,
-      [cleanBarcode, product.name, brand, category, product.price, product.imageUrl || imageUrl, JSON.stringify(product.nutrition)]
-    ).catch(() => {}); // Don't fail if cache write fails
+      [cleanBarcode, product.name, brand, category, product.price, product.imageUrl || imageUrl, JSON.stringify(product.nutrition), ingredients, allergens.length > 0 ? allergens : null, dietaryTags.length > 0 ? dietaryTags : null]
+    ).catch(() => {});
 
    // Apply crowdsourced store price if API didn't return one
     if ((!product.price || product.price === 0) && storeSpecificPrice) {

@@ -773,10 +773,13 @@ router.post('/price-items', async (req, res) => {
       messages: [
         {
           role: 'system',
-          content: `You are a grocery pricing assistant. Given a list of item names, return a JSON array with each item's name, estimated US grocery store price in USD, and department category.
+          content: `You are a grocery pricing and nutrition assistant. Given a list of item names, return a JSON array with a specific product name (include brand, size/weight), estimated US grocery store price in USD, department category, key ingredients, allergens present, and dietary tags.
+Make names specific: "milk" becomes "Great Value Whole Milk 1 Gallon", "eggs" becomes "Great Value Large Eggs 12 ct".
 Respond ONLY with JSON, no markdown or explanation:
-[{"name": "eggs", "price": 3.99, "department": "dairy"}, ...]
-Valid departments: dairy, bakery, produce, meat, seafood, frozen, beverages, snacks, pantry, household, other`
+[{"name": "Great Value Whole Milk 1 Gallon", "price": 3.36, "department": "dairy", "ingredients": "whole milk, vitamin D3", "allergens": ["dairy"], "dietary": ["gluten-free", "vegetarian"]}]
+Valid departments: dairy, bakery, produce, meat, seafood, frozen, beverages, snacks, pantry, household, other
+Valid allergens: dairy, eggs, peanuts, tree nuts, wheat, soy, fish, shellfish, sesame
+Valid dietary: vegetarian, vegan, gluten-free, keto, paleo, kosher, halal, organic, sugar-free, low-sodium, dairy-free, lactose-free`
         },
         { role: 'user', content: items.join(', ') },
       ],
@@ -805,7 +808,7 @@ Valid departments: dairy, bakery, produce, meat, seafood, frozen, beverages, sna
         if (!item.barcode && item.name) {
           // Search products table for a name match
           const match = await query(
-            `SELECT barcode, name, price FROM products 
+            `SELECT barcode, name, price, ingredients, allergens, dietary_tags FROM products 
              WHERE barcode IS NOT NULL 
                AND LOWER(name) LIKE $1
              ORDER BY updated_at DESC LIMIT 1`,
@@ -813,11 +816,14 @@ Valid departments: dairy, bakery, produce, meat, seafood, frozen, beverages, sna
           );
           if (match.rows.length > 0) {
             item.barcode = match.rows[0].barcode;
-            // Use DB price if GPT estimate seems off or if DB has real data
             if (match.rows[0].price && parseFloat(match.rows[0].price) > 0) {
               item.price = parseFloat(match.rows[0].price);
             }
-            console.log(`Matched "${item.name}" → barcode ${item.barcode} ($${item.price})`);
+            // Use DB allergen data if available (higher confidence than GPT)
+            if (match.rows[0].ingredients) item.ingredients = match.rows[0].ingredients;
+            if (match.rows[0].allergens?.length > 0) item.allergens = match.rows[0].allergens;
+            if (match.rows[0].dietary_tags?.length > 0) item.dietary = match.rows[0].dietary_tags;
+            console.log(`Matched "${item.name}" → barcode ${item.barcode} ($${item.price}) allergens: ${item.allergens || 'none'}`);
           }
         }
       }
