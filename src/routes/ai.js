@@ -841,4 +841,134 @@ Valid dietary: vegetarian, vegan, gluten-free, keto, paleo, kosher, halal, organ
   }
 });
 
+// ── GET /api/ai/smart-suggestions ─────────────────────────
+// Analyze purchase frequency and predict what the user needs to restock
+router.get('/smart-suggestions', authenticate, async (req, res) => {
+  try {
+    // Get items the user has added 2+ times with their frequency pattern
+    const result = await query(
+      `SELECT 
+         li.name,
+         li.department,
+         li.barcode,
+         COUNT(*) as times_added,
+         MAX(li.created_at) as last_added,
+         MIN(li.created_at) as first_added,
+         ROUND(EXTRACT(EPOCH FROM (MAX(li.created_at) - MIN(li.created_at))) / 
+           NULLIF(COUNT(*) - 1, 0) / 86400) as avg_days_between,
+         ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(li.created_at))) / 86400) as days_since_last
+       FROM list_items li
+       JOIN shopping_lists sl ON li.list_id = sl.id
+       WHERE sl.user_id = $1
+         AND li.name IS NOT NULL
+         AND li.name != ''
+       GROUP BY LOWER(li.name), li.name, li.department, li.barcode
+       HAVING COUNT(*) >= 2
+       ORDER BY 
+         ROUND(EXTRACT(EPOCH FROM (NOW() - MAX(li.created_at))) / 86400) / 
+           NULLIF(ROUND(EXTRACT(EPOCH FROM (MAX(li.created_at) - MIN(li.created_at))) / 
+           NULLIF(COUNT(*) - 1, 0) / 86400), 0) DESC NULLS LAST,
+         COUNT(*) DESC
+       LIMIT 8`,
+      [req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return successResponse(res, { suggestions: [], message: 'Keep shopping to build your pattern!' });
+    }
+
+    // Filter to items that are due or overdue for restock
+    const suggestions = [];
+    for (const row of result.rows) {
+      const avgDays = parseInt(row.avg_days_between) || 14;
+      const daysSince = parseInt(row.days_since_last) || 0;
+      const urgency = daysSince / avgDays; // >1 = overdue, 0.7-1 = due soon
+
+      if (urgency >= 0.6) {
+        // Get price from store_prices or products table
+        let price = 0;
+        if (row.barcode) {
+          const priceResult = await query(
+            `SELECT MIN(price) as best_price FROM store_prices WHERE barcode = $1 AND price > 0`,
+            [row.barcode]
+          );
+          if (priceResult.rows[0]?.best_price) {
+            price = parseFloat(priceResult.rows[0].best_price);
+          }
+        }
+        if (price === 0) {
+          const productResult = await query(
+            `SELECT price FROM products WHERE LOWER(name) LIKE $1 AND price > 0 ORDER BY updated_at DESC LIMIT 1`,
+            [`%${row.name.toLowerCase()}%`]
+          );
+          if (productResult.rows[0]?.price) {
+            price = parseFloat(productResult.rows[0].price);
+          }
+        }
+
+        suggestions.push({
+          name: row.name,
+          department: row.department || 'grocery',
+          barcode: row.barcode || null,
+          price: price,
+          timesAdded: parseInt(row.times_added),
+          avgDaysBetween: avgDays,
+          daysSinceLast: daysSince,
+          urgency: Math.round(urgency * 100) / 100,
+          reason: daysSince > avgDays
+            ? `You buy this every ~${avgDays} days — last added ${daysSince} days ago`
+            : `Usually every ~${avgDays} days — due soon`,
+        });
+      }
+    }
+
+    // If no prices from DB, ask GPT for estimates
+    const needPricing = suggestions.filter(s => s.price === 0);
+    if (needPricing.length > 0) {
+      try {
+        const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{
+              role: 'system',
+              content: 'Return ONLY a JSON array of prices for these grocery items. Format: [{"name":"item","price":X.XX}]',
+            }, {
+              role: 'user',
+              content: `Estimate current US grocery prices: ${needPricing.map(s => s.name).join(', ')}`,
+            }],
+            max_tokens: 200,
+          }),
+        });
+        const gptData = await openaiRes.json();
+        const priceText = gptData.choices?.[0]?.message?.content || '';
+        const cleaned = priceText.replace(/```json|```/g, '').trim();
+        const gptPrices = JSON.parse(cleaned);
+        for (const gp of gptPrices) {
+          const match = suggestions.find(s => s.name.toLowerCase().includes(gp.name.toLowerCase()) || gp.name.toLowerCase().includes(s.name.toLowerCase()));
+          if (match && match.price === 0) {
+            match.price = gp.price;
+          }
+        }
+      } catch (gptErr) {
+        // GPT pricing failed — items will show $0
+      }
+    }
+
+    successResponse(res, {
+      suggestions: suggestions.sort((a, b) => b.urgency - a.urgency).slice(0, 6),
+      message: `${suggestions.length} items may need restocking`,
+    });
+  } catch (error) {
+    console.error('Smart suggestions error:', error);
+    errorResponse(res, 500, 'Failed to generate suggestions');
+  }
+});
+
 module.exports = router;
+
+
