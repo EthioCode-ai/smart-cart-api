@@ -18,17 +18,28 @@ router.get('/', async (req, res) => {
   try {
     // Get stats
     const statsResult = await query(
-      `SELECT 
+      `SELECT
         (SELECT COUNT(*) FROM list_items li
          JOIN shopping_lists sl ON li.list_id = sl.id
-         WHERE sl.user_id = $1 
+         WHERE sl.user_id = $1
          AND li.created_at >= date_trunc('month', NOW())) as items_this_month,
-        (SELECT COALESCE(SUM(total), 0) FROM shopping_trips
-         WHERE user_id = $1 
-         AND trip_date >= date_trunc('month', NOW())) as total_spent,
         (SELECT COUNT(*) FROM shopping_trips
          WHERE user_id = $1
-         AND trip_date >= date_trunc('month', NOW())) as trips_this_month`,
+         AND trip_date >= date_trunc('month', NOW())) as trips_this_month,
+        (SELECT COALESCE(SUM(max_price - min_price), 0)
+         FROM (
+           SELECT li.barcode,
+                  MAX(sp.price) as max_price,
+                  MIN(sp.price) as min_price
+           FROM list_items li
+           JOIN shopping_lists sl ON li.list_id = sl.id
+           JOIN store_prices sp ON li.barcode = sp.barcode
+           WHERE sl.user_id = $1
+             AND li.barcode IS NOT NULL
+             AND li.barcode != ''
+           GROUP BY li.barcode
+           HAVING COUNT(DISTINCT sp.store_id) >= 2
+         ) price_diffs) as total_saved`,
       [req.user.id]
     );
 
@@ -76,7 +87,7 @@ router.get('/', async (req, res) => {
     successResponse(res, {
       stats: {
         itemsThisMonth: parseInt(stats.items_this_month) || 0,
-        totalSpent: parseFloat(stats.total_spent) || 0,
+        totalSaved: parseFloat(stats.total_saved) || 0,
         tripsThisMonth: parseInt(stats.trips_this_month) || 0,
         timeSaved: `${Math.floor(parseInt(stats.items_this_month) * 0.5)} min`,
       },
