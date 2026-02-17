@@ -298,12 +298,35 @@ router.post('/:id/items', async (req, res) => {
       return errorResponse(res, 404, 'List not found');
     }
 
-    const result = await query(
-      `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, barcode, added_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING *`,
-      [req.params.id, name.trim(), price || 0, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id]
-    );
+    // Weight-based pricing for produce, deli, meat, seafood, bulk
+      const WEIGHT_DEPARTMENTS = ['produce', 'deli', 'meat', 'seafood', 'bulk'];
+      const isWeightBased = WEIGHT_DEPARTMENTS.includes((department || '').toLowerCase());
+      let finalPrice = price || 0;
+      let weightValue = req.body.weight_value || null;
+      let weightUnit = req.body.weight_unit || null;
+      let pricePerUnit = req.body.price_per_unit || null;
+
+      if (isWeightBased && !pricePerUnit) {
+        // First time adding a weight-based item: treat price as the per-unit rate
+        pricePerUnit = price || 0;
+        if (!weightValue) {
+          finalPrice = 0; // No weight entered yet — price is 0 until they weigh it
+        }
+      }
+
+      if (isWeightBased && weightValue && pricePerUnit) {
+        const weightInLbs = weightUnit === 'kg' ? weightValue * 2.20462
+                          : weightUnit === 'oz' ? weightValue / 16
+                          : weightValue; // default lbs
+        finalPrice = Math.round(pricePerUnit * weightInLbs * 100) / 100;
+      }
+
+      const result = await query(
+        `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, barcode, added_by, weight_value, weight_unit, price_per_unit)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING *`,
+        [req.params.id, name.trim(), finalPrice, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id, weightValue, weightUnit, pricePerUnit]
+      );
 
     // Update list timestamp
     await query(
@@ -352,18 +375,36 @@ router.put('/:id/items/:itemId', async (req, res) => {
       return errorResponse(res, 404, 'List not found');
     }
 
-    const result = await query(
-      `UPDATE list_items SET
-        name = COALESCE($1, name),
-        price = COALESCE($2, price),
-        quantity = COALESCE($3, quantity),
-        department = COALESCE($4, department),
-        checked = COALESCE($5, checked),
-        updated_at = NOW()
-       WHERE id = $6 AND list_id = $7
-       RETURNING *`,
-      [name, price, quantity, department, checked, req.params.itemId, req.params.id]
-    );
+    // Recalculate weight-based pricing if weight fields provided
+      const WEIGHT_DEPARTMENTS = ['produce', 'deli', 'meat', 'seafood', 'bulk'];
+      const weightValue = req.body.weight_value;
+      const weightUnit = req.body.weight_unit;
+      const pricePerUnit = req.body.price_per_unit;
+      let finalPrice = price;
+
+      if (weightValue !== undefined && pricePerUnit !== undefined && pricePerUnit > 0) {
+        const wUnit = weightUnit || 'lbs';
+        const weightInLbs = wUnit === 'kg' ? weightValue * 2.20462
+                          : wUnit === 'oz' ? weightValue / 16
+                          : weightValue;
+        finalPrice = Math.round(pricePerUnit * weightInLbs * 100) / 100;
+      }
+
+      const result = await query(
+        `UPDATE list_items SET
+          name = COALESCE($1, name),
+          price = COALESCE($2, price),
+          quantity = COALESCE($3, quantity),
+          department = COALESCE($4, department),
+          checked = COALESCE($5, checked),
+          weight_value = COALESCE($6, weight_value),
+          weight_unit = COALESCE($7, weight_unit),
+          price_per_unit = COALESCE($8, price_per_unit),
+          updated_at = NOW()
+         WHERE id = $9 AND list_id = $10
+         RETURNING *`,
+        [name, finalPrice, quantity, department, checked, weightValue, weightUnit, pricePerUnit, req.params.itemId, req.params.id]
+      );
 
     if (result.rows.length === 0) {
       return errorResponse(res, 404, 'Item not found');
