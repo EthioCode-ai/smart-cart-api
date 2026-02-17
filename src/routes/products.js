@@ -4,7 +4,7 @@
 // ============================================================
 const express = require('express');
 const { query, successResponse, errorResponse } = require('../models/db');
-const { optionalAuth } = require('../middleware/auth');
+const { optionalAuth, authenticate } = require('../middleware/auth');
 const router = express.Router();
 
 // ── Cloudinary Setup ─────────────────────────────────────────
@@ -543,6 +543,59 @@ router.post('/upload-image', optionalAuth, async (req, res) => {
   } catch (error) {
     console.error('Upload image error:', error);
     errorResponse(res, 500, 'Failed to upload image');
+  }
+});
+
+// ─── GPT-4o Vision OCR for Walk & Scan ───
+router.post('/ocr-vision', auth, async (req, res) => {
+  try {
+    const { imageBase64 } = req.body;
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Read this grocery shelf price tag. Return ONLY valid JSON with no markdown:\n{"product_name": "...", "price": 0.00, "regular_price": null, "unit_price": null, "upc": null}\n\nRules:\n- price = the main shelf price customers pay (the large number)\n- regular_price = only if there is a separate higher regular/was/original price\n- unit_price = per oz/per lb/per fl oz price if shown\n- product_name = the product name on the tag\n- upc = barcode number if printed as digits on the tag (not QR codes)\n- All prices as numbers, not strings\n- If you cannot read a field, use null',
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${imageBase64}`,
+                detail: 'low',
+              },
+            },
+          ],
+        }],
+      }),
+    });
+
+    const data = await response.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    const cleaned = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    res.json({
+      product_name: parsed.product_name || null,
+      price: parsed.price || null,
+      regular_price: parsed.regular_price || null,
+      unit_price: parsed.unit_price || null,
+      upc: parsed.upc || null,
+      source: 'gpt_vision',
+    });
+  } catch (err) {
+    console.error('GPT Vision OCR error:', err.message);
+    res.status(500).json({ error: 'Vision OCR failed' });
   }
 });
 
