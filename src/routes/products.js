@@ -547,7 +547,7 @@ router.post('/upload-image', optionalAuth, async (req, res) => {
 });
 
 // ─── GPT-4o Vision OCR for Walk & Scan ───
-router.post('/ocr-vision', auth, async (req, res) => {
+router.post('/ocr-vision', authenticate, async (req, res) => {
   try {
     const { imageBase64 } = req.body;
     if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
