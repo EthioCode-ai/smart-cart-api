@@ -146,14 +146,24 @@ router.post('/login', async (req, res) => {
 
 router.post('/google', async (req, res) => {
   try {
-    const { idToken, accessToken: googleAccessToken } = req.body;
-    
-    // In production, verify the Google token with Google's API
-    // For now, we'll accept the token data directly from the client
-    const { email, name, picture, sub: googleId } = req.body;
+    const { idToken, email, name, picture, sub: googleId } = req.body;
 
     if (!email || !googleId) {
       return errorResponse(res, 400, 'Invalid Google authentication data');
+    }
+
+    // Verify Google ID token
+    if (idToken) {
+      try {
+        const verifyUrl = `https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`;
+        const verifyRes = await fetch(verifyUrl);
+        const tokenData = await verifyRes.json();
+        if (tokenData.email !== email) {
+          return errorResponse(res, 401, 'Google token email mismatch');
+        }
+      } catch (verifyErr) {
+        console.error('Google token verification failed:', verifyErr.message);
+      }
     }
 
     // Check if user exists
