@@ -556,5 +556,54 @@ router.post('/register', optionalAuth, async (req, res) => {
   }
 });
 
+// ─── GPT-4o Vision OCR for Aisle Signs ───
+router.post('/ocr-aisle', authenticate, async (req, res) => {
+  try {
+    const { imageBase64 } = req.body;
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 required' });
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Read this grocery store aisle sign. Return ONLY valid JSON with no markdown:\n{"aisles": ["A2", "A3"], "departments": ["Desserts", "Ice Cream"]}\n\nRules:\n- aisles = array of aisle identifiers shown on the sign (e.g. "A2", "7", "D14")\n- If the sign shows two aisles (like "A2 | A3"), return both in the array\n- departments = array of department/category names listed on the sign\n- Return exact text as shown, properly capitalized\n- If you cannot read a field, use empty array []',
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${imageBase64}`,
+                detail: 'low',
+              },
+            },
+          ],
+        }],
+      }),
+    });
+
+    const data = await response.json();
+    const text = data.choices?.[0]?.message?.content || '';
+    const cleaned = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    res.json({
+      aisles: parsed.aisles || [],
+      departments: parsed.departments || [],
+      source: 'gpt_vision',
+    });
+  } catch (err) {
+    console.error('GPT Vision aisle OCR error:', err.message);
+    res.status(500).json({ error: 'Vision OCR failed' });
+  }
+});
 
 module.exports = router;
