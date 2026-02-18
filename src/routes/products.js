@@ -197,18 +197,65 @@ router.post('/lookup', optionalAuth, async (req, res) => {
     try {
       if (storeId) {
         // First: exact store match
-        const exactMatch = await query(
-          'SELECT price, regular_price FROM store_prices WHERE barcode = $1 AND store_id = $2',
+       const exactMatch = await query(
+          'SELECT price, regular_price, confidence FROM store_prices WHERE barcode = $1 AND store_id = $2',
           [cleanBarcode, storeId]
         );
         if (exactMatch.rows.length > 0) {
           storeSpecificPrice = exactMatch.rows[0];
         }
       }
-      // Fallback: most recent price from any store
+      // Step 2: Same-chain nearby store (propagation with confidence decay)
+      if (!storeSpecificPrice && storeId) {
+        try {
+          const nearbyChain = await query(
+            `SELECT sp.price, sp.regular_price, sp.store_id,
+                    s.name AS store_name,
+                    (6371 * acos(
+                      cos(radians(ref.lat)) * cos(radians(s.lat)) *
+                      cos(radians(s.lng) - radians(ref.lng)) +
+                      sin(radians(ref.lat)) * sin(radians(s.lat))
+                    )) AS distance_km
+             FROM store_prices sp
+             JOIN stores s ON s.id = sp.store_id
+             JOIN stores ref ON ref.id = $2
+             WHERE sp.barcode = $1
+               AND sp.store_id != $2
+               AND LOWER(SPLIT_PART(s.name, ' ', 1)) = LOWER(SPLIT_PART(ref.name, ' ', 1))
+               AND sp.updated_at > NOW() - INTERVAL '14 days'
+             ORDER BY distance_km ASC
+             LIMIT 1`,
+            [cleanBarcode, storeId]
+          );
+          if (nearbyChain.rows.length > 0) {
+            const row = nearbyChain.rows[0];
+            const distKm = parseFloat(row.distance_km);
+            // Confidence decay: 0-16km=0.95, 16-48km=0.85, 48-160km=0.70
+            let confidence = 0.95;
+            if (distKm > 16) confidence = 0.85;
+            if (distKm > 48) confidence = 0.70;
+            if (distKm > 160) confidence = 0; // too far, don't propagate
+
+            if (confidence > 0) {
+              storeSpecificPrice = { price: row.price, regular_price: row.regular_price };
+              // Save propagated price to this store's cache
+              query(
+                `INSERT INTO store_prices (store_id, barcode, price, regular_price, source, scanned_by, propagated_from, confidence)
+                 VALUES ($1, $2, $3, $4, 'propagated', $5, $6, $7)
+                 ON CONFLICT (store_id, barcode) DO NOTHING`,
+                [storeId, cleanBarcode, row.price, row.regular_price, req.user?.id || null, row.store_id, confidence]
+              ).catch(() => {});
+            }
+          }
+        } catch (propErr) {
+          // Propagation failed, continue to fallback
+        }
+      }
+
+      // Step 3: Fallback — most recent price from any store
       if (!storeSpecificPrice) {
         const anyStore = await query(
-          'SELECT price, regular_price FROM store_prices WHERE barcode = $1 ORDER BY updated_at DESC LIMIT 1',
+          'SELECT price, regular_price, confidence FROM store_prices WHERE barcode = $1 ORDER BY updated_at DESC LIMIT 1',
           [cleanBarcode]
         );
         if (anyStore.rows.length > 0) {
@@ -220,8 +267,10 @@ router.post('/lookup', optionalAuth, async (req, res) => {
     }
 
     // Apply crowdsourced price to cached product
+    let priceConfidence = 1.00;
     if (cached.rows.length > 0 && storeSpecificPrice) {
       cached.rows[0].price = storeSpecificPrice.price;
+      priceConfidence = parseFloat(storeSpecificPrice.confidence ?? 1.00);
     }
 
     if (cached.rows.length > 0) {
@@ -237,6 +286,7 @@ router.post('/lookup', optionalAuth, async (req, res) => {
           ingredients: row.ingredients || null,
           allergens: row.allergens || [],
           dietaryTags: row.dietary_tags || [],
+          confidence: priceConfidence,
         },
         source: 'cache',
       });
