@@ -577,7 +577,7 @@ Respond in JSON with ONE of these structures based on your chosen mode:
 If mode is "shopping_list":
 {
   "mode": "shopping_list",
-  "listName": "A short, smart title for this shopping list (e.g. 'Weekly Groceries', 'Taco Night', 'BBQ Essentials'). Never use the user's raw command as the title. Summarize the intent in 2-4 words.",
+  "listName": "IMPORTANT: Create a clean, short title (2-4 words). NEVER repeat the user's words. Extract ONLY the dish or purpose. Examples: user says 'show me how to make spaghetti bolognese' → 'Spaghetti Bolognese Ingredients'. User says 'tell me how to prepare ethiopian shiro' → 'Ethiopian Shiro Ingredients'. User says 'give me a recipe for chicken curry' → 'Chicken Curry Ingredients'. User says 'I need stuff for a BBQ' → 'BBQ Essentials'.",
   "suggestions": [{"item": "milk", "category": "dairy", "reason": "essential staple", "price": 3.49}],
   "message": "friendly summary"
 }
@@ -585,17 +585,18 @@ If mode is "shopping_list":
 If mode is "recipe":
 {
   "mode": "recipe",
-  "listName": "Short title for the ingredient list (e.g. 'Spaghetti Bolognese Ingredients')",
+  "listName": "Short clean title — dish name + 'Ingredients' (e.g. 'Spaghetti Bolognese Ingredients'). NEVER repeat user's command.",
   "suggestions": [{"item": "ground beef", "category": "meat", "reason": "main protein", "price": 6.99}],
   "recipes": [{
     "title": "Recipe Name",
     "description": "Brief description",
+    "category": "Breakfast|Lunch|Dinner|Desserts",
     "ingredients": [{"item": "ground beef", "quantity": "2", "unit": "lbs", "category": "meat", "price": 6.99}],
     "instructions": ["Step 1...", "Step 2..."],
     "prepTime": 25,
     "servings": 4,
     "difficulty": "Easy|Medium|Hard",
-    "tags": ["dinner", "mexican"]
+    "tags": ["Must include one or more of: 'breakfast','lunch','dinner','snack','dessert'. Also include if applicable: 'quick_easy','healthy','vegetarian','vegan','gluten_free'"]
   }],
   "message": "friendly summary"
 }
@@ -603,7 +604,7 @@ If mode is "recipe":
 If mode is "full_course":
 {
   "mode": "full_course",
-  "listName": "Short title for the meal (e.g. 'Steak Dinner for Two')",
+  "listName": "Short clean title — meal theme + serving (e.g. 'Steak Dinner for Two'). NEVER repeat user's command.",
   "courses": [{
     "courseType": "appetizer|main|side|dessert|beverage",
     "dishName": "Dish Name",
