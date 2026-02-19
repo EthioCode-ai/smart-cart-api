@@ -63,6 +63,59 @@ const mapCategory = (categories) => {
 
 // ── POST /api/products/lookup ───────────────────────────────
 // Looks up a barcode using Open Food Facts (free, no API key needed)
+
+// ── GET /api/products/by-barcode ───────────────────────────────
+// Local DB-only barcode lookup (no external APIs)
+router.get('/by-barcode', optionalAuth, async (req, res) => {
+  try {
+    const { barcode } = req.query;
+    if (!barcode) {
+      return errorResponse(res, 400, 'Barcode is required');
+    }
+
+    const result = await query(
+      `SELECT p.*, 
+        (SELECT json_agg(json_build_object(
+          'storeId', sp.store_id, 
+          'storeName', s.name,
+          'price', sp.price,
+          'unitPrice', sp.unit_price,
+          'regularPrice', sp.regular_price,
+          'updatedAt', sp.updated_at
+        ))
+        FROM store_prices sp
+        JOIN stores s ON sp.store_id = s.id
+        WHERE sp.barcode = p.barcode
+        ) as store_prices
+       FROM products p
+       WHERE p.barcode = $1`,
+      [barcode]
+    );
+
+    if (result.rows.length === 0) {
+      return successResponse(res, { found: false, product: null });
+    }
+
+    const p = result.rows[0];
+    successResponse(res, {
+      found: true,
+      product: {
+        id: p.id,
+        barcode: p.barcode,
+        name: p.name,
+        brand: p.brand || null,
+        category: p.category,
+        price: parseFloat(p.price) || 0,
+        imageUrl: p.image_url,
+        storePrices: p.store_prices || [],
+      },
+    });
+  } catch (error) {
+    console.error('By-barcode lookup error:', error);
+    errorResponse(res, 500, 'Failed to look up product');
+  }
+});
+
 router.post('/lookup', optionalAuth, async (req, res) => {
   try {
     const { barcode, type } = req.body;
