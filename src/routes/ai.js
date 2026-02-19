@@ -677,13 +677,85 @@ Important rules:
       message: result.message || 'Here are your results!',
     };
 
+    // ── Cross-reference AI prices with real product data ──
+    const { latitude: userLat, longitude: userLng } = req.body;
+    const crossRefPrices = async (items) => {
+      if (!items || items.length === 0) return items;
+      try {
+        for (let i = 0; i < items.length; i++) {
+          const itemName = items[i].item || items[i].name || '';
+          if (!itemName) continue;
+
+          // Search products table for a match
+          const match = await query(
+            `SELECT p.barcode, p.name, p.brand, p.price, p.image_url
+             FROM products p
+             WHERE LOWER(p.name) LIKE $1
+             ORDER BY p.price DESC
+             LIMIT 1`,
+            [`%${itemName.toLowerCase()}%`]
+          );
+
+          if (match.rows.length > 0) {
+            const prod = match.rows[0];
+            let bestPrice = parseFloat(prod.price) || 0;
+
+            // Check market price if location available
+            if (userLat && userLng && prod.barcode) {
+              try {
+                const mp = await query(
+                  `SELECT price FROM market_prices
+                   WHERE barcode = $1
+                     AND (6371 * acos(
+                       cos(radians($2)) * cos(radians(latitude)) *
+                       cos(radians(longitude) - radians($3)) +
+                       sin(radians($2)) * sin(radians(latitude))
+                     )) < 80.5
+                   ORDER BY (6371 * acos(
+                       cos(radians($2)) * cos(radians(latitude)) *
+                       cos(radians(longitude) - radians($3)) +
+                       sin(radians($2)) * sin(radians(latitude))
+                     ))
+                   LIMIT 1`,
+                  [prod.barcode, userLat, userLng]
+                );
+                if (mp.rows.length > 0) {
+                  bestPrice = parseFloat(mp.rows[0].price);
+                }
+              } catch (e) {}
+            }
+
+            if (bestPrice > 0) {
+              items[i].price = bestPrice;
+              items[i].priceSource = 'database';
+            }
+            if (prod.brand) items[i].brand = prod.brand;
+          }
+        }
+      } catch (err) {
+        console.error('Price cross-reference error:', err.message);
+      }
+      return items;
+    };
+
     if (mode === 'shopping_list') {
-      response.suggestions = result.suggestions || [];
+      response.suggestions = await crossRefPrices(result.suggestions || []);
     } else if (mode === 'recipe') {
-      response.suggestions = result.suggestions || [];
+      response.suggestions = await crossRefPrices(result.suggestions || []);
       response.recipes = result.recipes || [];
+      // Also cross-ref recipe ingredients
+      for (let r = 0; r < response.recipes.length; r++) {
+        if (response.recipes[r].ingredients) {
+          response.recipes[r].ingredients = await crossRefPrices(response.recipes[r].ingredients);
+        }
+      }
     } else if (mode === 'full_course') {
       response.courses = result.courses || [];
+      for (let c = 0; c < response.courses.length; c++) {
+        if (response.courses[c].ingredients) {
+          response.courses[c].ingredients = await crossRefPrices(response.courses[c].ingredients);
+        }
+      }
       response.mealTheme = result.mealTheme || '';
       response.servings = result.servings || 4;
       response.heroImageUrl = heroImageUrl || DEFAULT_RECIPE_IMAGE;

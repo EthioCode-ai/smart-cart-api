@@ -68,15 +68,14 @@ const mapCategory = (categories) => {
 // Local DB-only barcode lookup (no external APIs)
 router.get('/by-barcode', optionalAuth, async (req, res) => {
   try {
-    const { barcode } = req.query;
+    const { barcode, lat, lng } = req.query;
     if (!barcode) {
       return errorResponse(res, 400, 'Barcode is required');
     }
-
     const result = await query(
-      `SELECT p.*, 
+      `SELECT p.*,
         (SELECT json_agg(json_build_object(
-          'storeId', sp.store_id, 
+          'storeId', sp.store_id,
           'storeName', s.name,
           'price', sp.price,
           'unitPrice', sp.unit_price,
@@ -91,12 +90,48 @@ router.get('/by-barcode', optionalAuth, async (req, res) => {
        WHERE p.barcode = $1`,
       [barcode]
     );
-
     if (result.rows.length === 0) {
       return successResponse(res, { found: false, product: null });
     }
-
     const p = result.rows[0];
+    let marketPrice = null;
+
+    // Check market price within 50 miles if location provided
+    if (lat && lng) {
+      try {
+        const mpResult = await query(
+          `SELECT price, unit_price, regular_price, latitude, longitude,
+             (6371 * acos(
+               cos(radians($2)) * cos(radians(latitude)) *
+               cos(radians(longitude) - radians($3)) +
+               sin(radians($2)) * sin(radians(latitude))
+             )) AS distance_km
+           FROM market_prices
+           WHERE barcode = $1
+             AND (6371 * acos(
+               cos(radians($2)) * cos(radians(latitude)) *
+               cos(radians(longitude) - radians($3)) +
+               sin(radians($2)) * sin(radians(latitude))
+             )) < 80.5
+           ORDER BY distance_km
+           LIMIT 1`,
+          [barcode, parseFloat(lat), parseFloat(lng)]
+        );
+        if (mpResult.rows.length > 0) {
+          marketPrice = {
+            price: parseFloat(mpResult.rows[0].price),
+            unitPrice: mpResult.rows[0].unit_price ? parseFloat(mpResult.rows[0].unit_price) : null,
+            regularPrice: mpResult.rows[0].regular_price ? parseFloat(mpResult.rows[0].regular_price) : null,
+            distanceKm: parseFloat(mpResult.rows[0].distance_km),
+          };
+        }
+      } catch (mpErr) {
+        console.error('Market price lookup error:', mpErr.message);
+      }
+    }
+
+    const bestPrice = marketPrice ? marketPrice.price : (parseFloat(p.price) || 0);
+
     successResponse(res, {
       found: true,
       product: {
@@ -105,9 +140,12 @@ router.get('/by-barcode', optionalAuth, async (req, res) => {
         name: p.name,
         brand: p.brand || null,
         category: p.category,
-        price: parseFloat(p.price) || 0,
+        price: bestPrice,
+        basePrice: parseFloat(p.price) || 0,
+        marketPrice: marketPrice,
         imageUrl: p.image_url,
         storePrices: p.store_prices || [],
+        priceSource: marketPrice ? 'market' : 'catalog',
       },
     });
   } catch (error) {
@@ -560,7 +598,7 @@ router.get('/search', optionalAuth, async (req, res) => {
 // Returns matching products with brands and store prices for list item selection
 router.get('/brand-options', optionalAuth, async (req, res) => {
   try {
-    const { q, storeId, limit = 20 } = req.query;
+    const { q, storeId, lat, lng, limit = 20 } = req.query;
     if (!q || q.trim().length < 2) {
       return successResponse(res, { options: [] });
     }
@@ -626,8 +664,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
     }
 
     const result = await query(queryText, params);
-
-    const options = result.rows.map(row => ({
+    let options = result.rows.map(row => ({
       id: row.id,
       name: row.name,
       brand: row.brand || null,
@@ -640,6 +677,48 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
       priceSource: row.price_source,
     }));
 
+    // Overlay market prices if location provided
+    if (lat && lng && options.length > 0) {
+      try {
+        const barcodes = options.filter(o => o.barcode).map(o => o.barcode);
+        if (barcodes.length > 0) {
+          const mpResult = await query(
+            `SELECT DISTINCT ON (barcode) barcode, price, unit_price, regular_price
+             FROM market_prices
+             WHERE barcode = ANY($1)
+               AND (6371 * acos(
+                 cos(radians($2)) * cos(radians(latitude)) *
+                 cos(radians(longitude) - radians($3)) +
+                 sin(radians($2)) * sin(radians(latitude))
+               )) < 80.5
+             ORDER BY barcode, (6371 * acos(
+                 cos(radians($2)) * cos(radians(latitude)) *
+                 cos(radians(longitude) - radians($3)) +
+                 sin(radians($2)) * sin(radians(latitude))
+               ))`,
+            [barcodes, parseFloat(lat), parseFloat(lng)]
+          );
+          const marketMap = {};
+          mpResult.rows.forEach(mp => { marketMap[mp.barcode] = mp; });
+          options = options.map(opt => {
+            const mp = opt.barcode ? marketMap[opt.barcode] : null;
+            if (mp) {
+              return {
+                ...opt,
+                price: parseFloat(mp.price) || opt.price,
+                unitPrice: mp.unit_price ? parseFloat(mp.unit_price) : opt.unitPrice,
+                regularPrice: mp.regular_price ? parseFloat(mp.regular_price) : opt.regularPrice,
+                priceSource: 'market',
+              };
+            }
+            return opt;
+          });
+        }
+      } catch (mpErr) {
+        console.error('Market price overlay error:', mpErr.message);
+      }
+    }
+
     successResponse(res, { options });
   } catch (error) {
     console.error('Brand options error:', error);
@@ -651,7 +730,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
 // Batch save scanned products with prices from Walk & Scan
 router.post('/batch-price', optionalAuth, async (req, res) => {
   try {
-    const { storeId, aisleNumber, products } = req.body;
+    const { storeId, aisleNumber, products, latitude, longitude } = req.body;
 
     if (!products || !Array.isArray(products) || products.length === 0) {
       return errorResponse(res, 400, 'Products array is required');
@@ -702,8 +781,55 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
           }
         }
       }
-    }
 
+      // ── Market pricing (50-mile zones) ──
+      if (latitude && longitude && price > 0) {
+        try {
+          // Find existing market price within 50 miles (~80.5 km)
+          const marketResult = await query(
+            `SELECT id, price FROM market_prices
+             WHERE barcode = $1
+               AND (6371 * acos(
+                 cos(radians($2)) * cos(radians(latitude)) *
+                 cos(radians(longitude) - radians($3)) +
+                 sin(radians($2)) * sin(radians(latitude))
+               )) < 80.5
+             ORDER BY (6371 * acos(
+                 cos(radians($2)) * cos(radians(latitude)) *
+                 cos(radians(longitude) - radians($3)) +
+                 sin(radians($2)) * sin(radians(latitude))
+               ))
+             LIMIT 1`,
+            [barcode, latitude, longitude]
+          );
+
+          if (marketResult.rows.length === 0) {
+            // No market within 50 miles → INSERT new market
+            await query(
+              `INSERT INTO market_prices (barcode, price, unit_price, regular_price, latitude, longitude, source, scanned_by)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [barcode, price, product.unitPrice || null, regularPrice || null, latitude, longitude, source || 'walk_scan', req.user?.id || null]
+            );
+          } else {
+            const existing = marketResult.rows[0];
+            if (parseFloat(existing.price) !== parseFloat(price)) {
+              // Price changed → UPDATE + move center
+              await query(
+                `UPDATE market_prices SET
+                   price = $1, unit_price = $2, regular_price = $3,
+                   latitude = $4, longitude = $5,
+                   scanned_by = $6, updated_at = NOW()
+                 WHERE id = $7`,
+                [price, product.unitPrice || null, regularPrice || null, latitude, longitude, req.user?.id || null, existing.id]
+              );
+            }
+            // Same price → SKIP
+          }
+        } catch (marketErr) {
+          console.error(`Market price error for ${barcode}:`, marketErr.message);
+        }
+      }
+    }
     successResponse(res, { saved, pricesUpdated, total: products.length });
   } catch (error) {
     console.error('Batch price error:', error);
