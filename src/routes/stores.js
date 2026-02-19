@@ -80,7 +80,7 @@ const fetchGooglePlaces = async (originLat, originLng, radiusMeters = 25000, key
   const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json`
     + `?location=${originLat},${originLng}`
     + `&radius=${radiusMeters}`
-    + `&keyword=${encodeURIComponent(keyword)}`
+    + `&type=supermarket`
     + `&key=${GOOGLE_MAPS_KEY}`;
 
   try {
