@@ -524,6 +524,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
           p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
           COALESCE(sp_store.price, sp_any.price, p.price) AS price,
           COALESCE(sp_store.regular_price, sp_any.regular_price) AS regular_price,
+          COALESCE(sp_store.unit_price, sp_any.unit_price) AS unit_price,
           CASE 
             WHEN sp_store.price IS NOT NULL THEN 'store'
             WHEN sp_any.price IS NOT NULL THEN 'other_store'
@@ -552,6 +553,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
           p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
           COALESCE(sp.price, p.price) AS price,
           sp.regular_price,
+          sp.unit_price,
           CASE WHEN sp.price IS NOT NULL THEN 'store' ELSE 'product' END AS price_source
         FROM products p
         LEFT JOIN LATERAL (
@@ -581,6 +583,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
       imageUrl: row.image_url,
       price: parseFloat(row.price) || 0,
       regularPrice: row.regular_price ? parseFloat(row.regular_price) : null,
+      unitPrice: row.unit_price ? parseFloat(row.unit_price) : null,
       priceSource: row.price_source,
     }));
 
@@ -628,16 +631,17 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
       if (storeId && price > 0) {
         try {
           await query(
-            `INSERT INTO store_prices (store_id, barcode, price, regular_price, aisle_number, source, scanned_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `INSERT INTO store_prices (store_id, barcode, price, regular_price, unit_price, aisle_number, source, scanned_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (store_id, barcode) DO UPDATE SET
                price = $3,
                regular_price = COALESCE($4, store_prices.regular_price),
-               aisle_number = COALESCE($5, store_prices.aisle_number),
-               source = $6,
-               scanned_by = $7,
+               unit_price = COALESCE($5, store_prices.unit_price),
+               aisle_number = COALESCE($6, store_prices.aisle_number),
+               source = $7,
+               scanned_by = $8,
                updated_at = NOW()`,
-            [storeId, barcode, price, regularPrice || null, aisleNumber || null, source || 'walk_scan', req.user?.id || null]
+            [storeId, barcode, price, regularPrice || null, product.unitPrice || null, aisleNumber || null, source || 'walk_scan', req.user?.id || null]
           );
         } catch (priceErr) {
           if (priceErr.code !== '42P01') {
