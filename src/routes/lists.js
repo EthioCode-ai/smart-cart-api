@@ -168,13 +168,18 @@ router.get('/:id', async (req, res) => {
     const items = itemsResult.rows.map(item => ({
       id: item.id,
       name: item.name,
+      brand: item.brand || null,
       price: parseFloat(item.price) || 0,
-      quantity: item.quantity,
+      quantity: parseFloat(item.quantity) || 1,
       unit: item.unit || null,
       department: item.department,
       category: item.department,
       checked: item.checked,
       notes: item.notes || '',
+      barcode: item.barcode || null,
+      weightValue: item.weight_value ? parseFloat(item.weight_value) : null,
+      weightUnit: item.weight_unit || null,
+      pricePerUnit: item.price_per_unit ? parseFloat(item.price_per_unit) : null,
       addedBy: item.added_by,
       addedByName: item.added_by_name,
       createdAt: item.created_at,
@@ -322,10 +327,10 @@ router.post('/:id/items', async (req, res) => {
       }
 
       const result = await query(
-        `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, barcode, added_by, weight_value, weight_unit, price_per_unit)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, barcode, added_by, weight_value, weight_unit, price_per_unit, brand)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING *`,
-        [req.params.id, name.trim(), finalPrice, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id, weightValue, weightUnit, pricePerUnit]
+        [req.params.id, name.trim(), finalPrice, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id, weightValue, weightUnit, pricePerUnit, req.body.brand || null]
       );
 
     // Update list timestamp
@@ -340,13 +345,18 @@ router.post('/:id/items', async (req, res) => {
       item: {
         id: item.id,
         name: item.name,
+        brand: item.brand || null,
         price: parseFloat(item.price) || 0,
-        quantity: item.quantity,
+        quantity: parseFloat(item.quantity) || 1,
         unit: item.unit || null,
         department: item.department,
         category: item.department,
         checked: item.checked,
         notes: item.notes || '',
+        barcode: item.barcode || null,
+        weightValue: item.weight_value ? parseFloat(item.weight_value) : null,
+        weightUnit: item.weight_unit || null,
+        pricePerUnit: item.price_per_unit ? parseFloat(item.price_per_unit) : null,
         addedBy: item.added_by,
         createdAt: item.created_at,
       },
@@ -400,10 +410,11 @@ router.put('/:id/items/:itemId', async (req, res) => {
           weight_value = COALESCE($6, weight_value),
           weight_unit = COALESCE($7, weight_unit),
           price_per_unit = COALESCE($8, price_per_unit),
+          brand = COALESCE($9, brand),
           updated_at = NOW()
-         WHERE id = $9 AND list_id = $10
+         WHERE id = $10 AND list_id = $11
          RETURNING *`,
-        [name, finalPrice, quantity, department, checked, weightValue, weightUnit, pricePerUnit, req.params.itemId, req.params.id]
+        [name, finalPrice, quantity, department, checked, weightValue, weightUnit, pricePerUnit, req.body.brand, req.params.itemId, req.params.id]
       );
 
     if (result.rows.length === 0) {
@@ -422,10 +433,17 @@ router.put('/:id/items/:itemId', async (req, res) => {
       item: {
         id: item.id,
         name: item.name,
+        brand: item.brand || null,
         price: parseFloat(item.price) || 0,
-        quantity: item.quantity,
+        quantity: parseFloat(item.quantity) || 1,
+        unit: item.unit || null,
         department: item.department,
         checked: item.checked,
+        notes: item.notes || '',
+        barcode: item.barcode || null,
+        weightValue: item.weight_value ? parseFloat(item.weight_value) : null,
+        weightUnit: item.weight_unit || null,
+        pricePerUnit: item.price_per_unit ? parseFloat(item.price_per_unit) : null,
         addedBy: item.added_by,
         createdAt: item.created_at,
       },

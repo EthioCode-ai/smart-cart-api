@@ -212,9 +212,9 @@ router.post('/lookup', optionalAuth, async (req, res) => {
             `SELECT sp.price, sp.regular_price, sp.store_id,
                     s.name AS store_name,
                     (6371 * acos(
-                      cos(radians(ref.lat)) * cos(radians(s.lat)) *
-                      cos(radians(s.lng) - radians(ref.lng)) +
-                      sin(radians(ref.lat)) * sin(radians(s.lat))
+                      cos(radians(ref.latitude)) * cos(radians(s.latitude)) *
+                      cos(radians(s.longitude) - radians(ref.longitude)) +
+                      sin(radians(ref.latitude)) * sin(radians(s.latitude))
                     )) AS distance_km
              FROM store_prices sp
              JOIN stores s ON s.id = sp.store_id
@@ -500,6 +500,94 @@ router.get('/search', optionalAuth, async (req, res) => {
   } catch (error) {
     console.error('Product search error:', error);
     errorResponse(res, 500, 'Failed to search products');
+  }
+});
+
+// ── GET /api/products/brand-options ────────────────────────────
+// Returns matching products with brands and store prices for list item selection
+router.get('/brand-options', optionalAuth, async (req, res) => {
+  try {
+    const { q, storeId, limit = 20 } = req.query;
+    if (!q || q.trim().length < 2) {
+      return successResponse(res, { options: [] });
+    }
+
+    const searchTerm = `%${q.trim().toLowerCase()}%`;
+
+    // Search local products with store prices
+    let queryText, params;
+
+    if (storeId) {
+      // Prefer prices from the specified store, fall back to any store
+      queryText = `
+        SELECT DISTINCT ON (p.id)
+          p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
+          COALESCE(sp_store.price, sp_any.price, p.price) AS price,
+          COALESCE(sp_store.regular_price, sp_any.regular_price) AS regular_price,
+          CASE 
+            WHEN sp_store.price IS NOT NULL THEN 'store'
+            WHEN sp_any.price IS NOT NULL THEN 'other_store'
+            ELSE 'product'
+          END AS price_source
+        FROM products p
+        LEFT JOIN store_prices sp_store 
+          ON sp_store.barcode = p.barcode AND sp_store.store_id = $2
+        LEFT JOIN LATERAL (
+          SELECT price, regular_price 
+          FROM store_prices 
+          WHERE barcode = p.barcode AND store_id != $2
+          ORDER BY updated_at DESC 
+          LIMIT 1
+        ) sp_any ON sp_store.price IS NULL
+        WHERE LOWER(p.name) LIKE $1
+          OR LOWER(p.brand) LIKE $1
+          OR LOWER(p.category) LIKE $1
+        ORDER BY p.id, sp_store.price NULLS LAST
+        LIMIT $3
+      `;
+      params = [searchTerm, storeId, parseInt(limit)];
+    } else {
+      queryText = `
+        SELECT DISTINCT ON (p.id)
+          p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
+          COALESCE(sp.price, p.price) AS price,
+          sp.regular_price,
+          CASE WHEN sp.price IS NOT NULL THEN 'store' ELSE 'product' END AS price_source
+        FROM products p
+        LEFT JOIN LATERAL (
+          SELECT price, regular_price 
+          FROM store_prices 
+          WHERE barcode = p.barcode
+          ORDER BY updated_at DESC 
+          LIMIT 1
+        ) sp ON true
+        WHERE LOWER(p.name) LIKE $1
+          OR LOWER(p.brand) LIKE $1
+          OR LOWER(p.category) LIKE $1
+        ORDER BY p.id
+        LIMIT $2
+      `;
+      params = [searchTerm, parseInt(limit)];
+    }
+
+    const result = await query(queryText, params);
+
+    const options = result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      brand: row.brand || null,
+      category: row.category,
+      barcode: row.barcode,
+      imageUrl: row.image_url,
+      price: parseFloat(row.price) || 0,
+      regularPrice: row.regular_price ? parseFloat(row.regular_price) : null,
+      priceSource: row.price_source,
+    }));
+
+    successResponse(res, { options });
+  } catch (error) {
+    console.error('Brand options error:', error);
+    errorResponse(res, 500, 'Failed to fetch brand options');
   }
 });
 
