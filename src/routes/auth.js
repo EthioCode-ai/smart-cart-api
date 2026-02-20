@@ -99,7 +99,7 @@ router.post('/login', async (req, res) => {
 
     // Find user
     const result = await query(
-      'SELECT id, name, email, password_hash, avatar_url FROM users WHERE email = $1',
+      'SELECT id, name, email, password_hash, avatar_url, default_store_id FROM users WHERE email = $1',
       [email.toLowerCase()]
     );
 
@@ -166,10 +166,8 @@ router.post('/google', async (req, res) => {
       }
     }
 
-    // Check if user exists
-    let user;
     const existingUser = await query(
-      'SELECT id, name, email, avatar_url FROM users WHERE google_id = $1 OR email = $2',
+      'SELECT id, name, email, avatar_url, default_store_id FROM users WHERE google_id = $1 OR email = $2',
       [googleId, email.toLowerCase()]
     );
 
@@ -225,6 +223,8 @@ router.post('/google', async (req, res) => {
     errorResponse(res, 500, 'Failed to authenticate with Google');
   }
 });
+
+
 
 // ── POST /api/auth/refresh ──────────────────────────────────
 
@@ -307,12 +307,25 @@ router.post('/logout', authenticate, async (req, res) => {
 
 router.get('/me', authenticate, async (req, res) => {
   try {
+    // Get default store info if set
+    let defaultStore = null;
+    if (req.user.default_store_id) {
+      const storeResult = await query(
+        'SELECT id, name, address, latitude, longitude FROM stores WHERE id = $1',
+        [req.user.default_store_id]
+      );
+      if (storeResult.rows.length > 0) {
+        const s = storeResult.rows[0];
+        defaultStore = { id: s.id, name: s.name, address: s.address, latitude: s.latitude, longitude: s.longitude };
+      }
+    }
     successResponse(res, {
       user: {
         id: req.user.id,
         name: req.user.name,
         email: req.user.email,
         avatarUrl: req.user.avatar_url,
+        defaultStore,
       },
     });
   } catch (error) {
@@ -350,6 +363,30 @@ router.put('/profile', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Update profile error:', error);
     errorResponse(res, 500, 'Failed to update profile');
+  }
+});
+
+// ── PUT /api/auth/default-store ──────────────────────────────────
+router.put('/default-store', authenticate, async (req, res) => {
+  try {
+    const { storeId } = req.body;
+    
+    if (storeId) {
+      const storeCheck = await query('SELECT id FROM stores WHERE id = $1', [storeId]);
+      if (storeCheck.rows.length === 0) {
+        return errorResponse(res, 404, 'Store not found');
+      }
+    }
+
+    await query(
+      'UPDATE users SET default_store_id = $1, updated_at = NOW() WHERE id = $2',
+      [storeId || null, req.user.id]
+    );
+
+    successResponse(res, { defaultStoreId: storeId || null });
+  } catch (error) {
+    console.error('Set default store error:', error);
+    errorResponse(res, 500, 'Failed to set default store');
   }
 });
 
