@@ -603,7 +603,11 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
       return successResponse(res, { options: [] });
     }
 
+    const words = q.trim().toLowerCase().split(/\s+/).filter(w => w.length >= 2);
     const searchTerm = `%${q.trim().toLowerCase()}%`;
+    // Build OR conditions for each word
+    const wordConditions = words.map((_, i) => `(LOWER(p.name) LIKE $${i + 1} OR LOWER(p.brand) LIKE $${i + 1} OR LOWER(p.category) LIKE $${i + 1})`).join(' OR ');
+    const wordParams = words.map(w => `%${w}%`);
 
     // Search local products with store prices
     let queryText, params;
@@ -746,13 +750,15 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
       try {
         await query(
           `INSERT INTO products (barcode, name, brand, category, price, image_url)
-           VALUES ($1, $2, NULL, 'grocery', $3, $4)
+           VALUES ($1, $2, $3, COALESCE(NULLIF($4, ''), 'grocery'), $5, $6)
            ON CONFLICT (barcode) DO UPDATE SET
              name = COALESCE(NULLIF($2, ''), products.name),
-             price = CASE WHEN $3 > 0 THEN $3 ELSE products.price END,
-             image_url = COALESCE(NULLIF($4, ''), products.image_url),
+             brand = COALESCE(NULLIF($3, ''), products.brand),
+             category = COALESCE(NULLIF($4, ''), products.category),
+             price = CASE WHEN $5 > 0 THEN $5 ELSE products.price END,
+             image_url = COALESCE(NULLIF($6, ''), products.image_url),
              updated_at = NOW()`,
-          [barcode, name || null, price || 0, imageUrl || null]
+          [barcode, name || null, product.brand || null, product.category || null, price || 0, imageUrl || null]
         );
         saved++;
         if (price > 0) pricesUpdated++;
@@ -887,7 +893,7 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
           content: [
             {
               type: 'text',
-              text: 'Read this grocery shelf price tag. Return ONLY valid JSON with no markdown:\n{"product_name": "...", "price": 0.00, "regular_price": null, "unit_price": null, "upc": null}\n\nRules:\n- price = the main shelf price customers pay (the large number)\n- regular_price = only if there is a separate higher regular/was/original price\n- unit_price = per oz/per lb/per fl oz price if shown\n- product_name = the product name on the tag\n- upc = barcode number if printed as digits on the tag (not QR codes)\n- All prices as numbers, not strings\n- If you cannot read a field, use null',
+              text: 'Read this grocery shelf price tag. Return ONLY valid JSON with no markdown:\n{"product_name": "...", "brand": null, "category": "...", "price": 0.00, "regular_price": null, "unit_price": null, "upc": null}\n\nRules:\n- price = the main shelf price customers pay (the large number)\n- regular_price = only if there is a separate higher regular/was/original price\n- unit_price = per oz/per lb/per fl oz price if shown\n- product_name = the product name on the tag\n- brand = the brand name if visible on the tag\n- category = classify as one of: produce, dairy, meat, seafood, bakery, deli, frozen, beverages, snacks, pantry, household, wine, beer, spirits, health, baby, pets, other\n- upc = barcode number if printed as digits on the tag (not QR codes)\n- All prices as numbers, not strings\n- If you cannot read a field, use null',
             },
             {
               type: 'image_url',
@@ -908,6 +914,8 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
 
     res.json({
       product_name: parsed.product_name || null,
+      brand: parsed.brand || null,
+      category: parsed.category || null,
       price: parsed.price || null,
       regular_price: parsed.regular_price || null,
       unit_price: parsed.unit_price || null,
