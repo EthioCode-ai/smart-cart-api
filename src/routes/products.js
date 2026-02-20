@@ -605,9 +605,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
 
     const words = q.trim().toLowerCase().split(/\s+/).filter(w => w.length >= 2);
     const searchTerm = `%${q.trim().toLowerCase()}%`;
-    // Build OR conditions for each word
-    const wordConditions = words.map((_, i) => `(LOWER(p.name) LIKE $${i + 1} OR LOWER(p.brand) LIKE $${i + 1} OR LOWER(p.category) LIKE $${i + 1})`).join(' OR ');
-    const wordParams = words.map(w => `%${w}%`);
+   
 
     // Search local products with store prices
     let queryText, params;
@@ -628,13 +626,11 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
         FROM products p
         LEFT JOIN store_prices sp_store 
           ON sp_store.barcode = p.barcode AND sp_store.store_id = $2
-        LEFT JOIN LATERAL (
-          SELECT price, regular_price 
+        SELECT price, regular_price, unit_price
           FROM store_prices 
           WHERE barcode = p.barcode AND store_id != $2
           ORDER BY updated_at DESC 
           LIMIT 1
-        ) sp_any ON sp_store.price IS NULL
         WHERE LOWER(p.name) LIKE $1
           OR LOWER(p.brand) LIKE $1
           OR LOWER(p.category) LIKE $1
@@ -667,7 +663,28 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
       params = [searchTerm, parseInt(limit)];
     }
 
-    const result = await query(queryText, params);
+    let result = await query(queryText, params);
+
+    // If few results, try matching individual words
+    if (result.rows.length < 3 && words.length > 0) {
+      try {
+        const wordConditions = words.map((_, i) => `(LOWER(p.name) LIKE $${i + 1} OR LOWER(p.brand) LIKE $${i + 1} OR LOWER(p.category) LIKE $${i + 1})`).join(' OR ');
+        const wordResult = await query(
+          `SELECT DISTINCT p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.price,
+             NULL as regular_price, NULL as unit_price, 'product' as price_source
+           FROM products p
+           WHERE ${wordConditions}
+           LIMIT 20`,
+          words.map(w => `%${w}%`)
+        );
+        const existingIds = new Set(result.rows.map(r => r.id));
+        const newRows = wordResult.rows.filter(r => !existingIds.has(r.id));
+        result = { rows: [...result.rows, ...newRows] };
+      } catch (wordErr) {
+        console.error('Word search fallback error:', wordErr.message);
+      }
+    }
+
     let options = result.rows.map(row => ({
       id: row.id,
       name: row.name,
