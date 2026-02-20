@@ -388,4 +388,242 @@ router.post('/history', async (req, res) => {
   }
 });
 
+// ── GET /api/settings/family-links ──────────────────────────────
+// Get all linked family members (accepted) and pending invites
+router.get('/family-links', async (req, res) => {
+  try {
+    // Get accepted family links (bidirectional)
+    const acceptedResult = await query(
+      `SELECT fl.id, fl.relationship, fl.status, fl.created_at,
+         CASE WHEN fl.inviter_id = $1 THEN fl.invitee_id ELSE fl.inviter_id END AS member_id,
+         CASE WHEN fl.inviter_id = $1 THEN u2.name ELSE u1.name END AS member_name,
+         CASE WHEN fl.inviter_id = $1 THEN u2.email ELSE u1.email END AS member_email,
+         CASE WHEN fl.inviter_id = $1 THEN u2.avatar_url ELSE u1.avatar_url END AS member_avatar
+       FROM family_links fl
+       JOIN users u1 ON fl.inviter_id = u1.id
+       JOIN users u2 ON fl.invitee_id = u2.id
+       WHERE (fl.inviter_id = $1 OR fl.invitee_id = $1)
+         AND fl.status = 'accepted'
+       ORDER BY fl.created_at`,
+      [req.user.id]
+    );
+
+    // Get pending invites I sent
+    const sentResult = await query(
+      `SELECT fl.id, fl.relationship, fl.status, fl.created_at,
+         u.id AS member_id, u.name AS member_name, u.email AS member_email, u.avatar_url AS member_avatar
+       FROM family_links fl
+       JOIN users u ON fl.invitee_id = u.id
+       WHERE fl.inviter_id = $1 AND fl.status = 'pending'
+       ORDER BY fl.created_at DESC`,
+      [req.user.id]
+    );
+
+    // Get pending invites I received
+    const receivedResult = await query(
+      `SELECT fl.id, fl.relationship, fl.status, fl.created_at,
+         u.id AS member_id, u.name AS member_name, u.email AS member_email, u.avatar_url AS member_avatar
+       FROM family_links fl
+       JOIN users u ON fl.inviter_id = u.id
+       WHERE fl.invitee_id = $1 AND fl.status = 'pending'
+       ORDER BY fl.created_at DESC`,
+      [req.user.id]
+    );
+
+    const formatLink = (row) => ({
+      id: row.id,
+      memberId: row.member_id,
+      name: row.member_name,
+      email: row.member_email,
+      avatarUrl: row.member_avatar,
+      relationship: row.relationship,
+      status: row.status,
+      createdAt: row.created_at,
+    });
+
+    successResponse(res, {
+      family: acceptedResult.rows.map(formatLink),
+      sentInvites: sentResult.rows.map(formatLink),
+      receivedInvites: receivedResult.rows.map(formatLink),
+    });
+  } catch (error) {
+    console.error('Get family links error:', error);
+    errorResponse(res, 500, 'Failed to fetch family links');
+  }
+});
+
+// ── POST /api/settings/family-links/invite ──────────────────────
+router.post('/family-links/invite', async (req, res) => {
+  try {
+    const { email, relationship } = req.body;
+    if (!email) {
+      return errorResponse(res, 400, 'Email is required');
+    }
+
+    // Can't invite yourself
+    if (email.toLowerCase() === req.user.email) {
+      return errorResponse(res, 400, 'You cannot invite yourself');
+    }
+
+    // Find user by email
+    const userResult = await query(
+      'SELECT id, name, email FROM users WHERE email = $1',
+      [email.toLowerCase()]
+    );
+    if (userResult.rows.length === 0) {
+      return errorResponse(res, 404, 'No Smart Cart account found with that email. They need to create an account first.');
+    }
+
+    const invitee = userResult.rows[0];
+
+    // Check if link already exists (either direction)
+    const existingResult = await query(
+      `SELECT id, status FROM family_links
+       WHERE (inviter_id = $1 AND invitee_id = $2)
+          OR (inviter_id = $2 AND invitee_id = $1)`,
+      [req.user.id, invitee.id]
+    );
+
+    if (existingResult.rows.length > 0) {
+      const existing = existingResult.rows[0];
+      if (existing.status === 'accepted') {
+        return errorResponse(res, 400, 'Already linked as family');
+      }
+      if (existing.status === 'pending') {
+        return errorResponse(res, 400, 'Invite already pending');
+      }
+    }
+
+    const result = await query(
+      `INSERT INTO family_links (inviter_id, invitee_id, relationship, status)
+       VALUES ($1, $2, $3, 'pending')
+       RETURNING *`,
+      [req.user.id, invitee.id, relationship || null]
+    );
+
+    successResponse(res, {
+      invite: {
+        id: result.rows[0].id,
+        name: invitee.name,
+        email: invitee.email,
+        relationship: relationship || null,
+        status: 'pending',
+      },
+    }, 201);
+  } catch (error) {
+    console.error('Send family invite error:', error);
+    errorResponse(res, 500, 'Failed to send invite');
+  }
+});
+
+// ── PUT /api/settings/family-links/:id/accept ───────────────────
+router.put('/family-links/:id/accept', async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE family_links SET status = 'accepted', updated_at = NOW()
+       WHERE id = $1 AND invitee_id = $2 AND status = 'pending'
+       RETURNING *`,
+      [req.params.id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return errorResponse(res, 404, 'Invite not found or already processed');
+    }
+
+    successResponse(res, { message: 'Invite accepted!' });
+  } catch (error) {
+    console.error('Accept family invite error:', error);
+    errorResponse(res, 500, 'Failed to accept invite');
+  }
+});
+
+// ── PUT /api/settings/family-links/:id/decline ──────────────────
+router.put('/family-links/:id/decline', async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE family_links SET status = 'declined', updated_at = NOW()
+       WHERE id = $1 AND invitee_id = $2 AND status = 'pending'
+       RETURNING *`,
+      [req.params.id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return errorResponse(res, 404, 'Invite not found or already processed');
+    }
+
+    successResponse(res, { message: 'Invite declined' });
+  } catch (error) {
+    console.error('Decline family invite error:', error);
+    errorResponse(res, 500, 'Failed to decline invite');
+  }
+});
+
+// ── DELETE /api/settings/family-links/:id ────────────────────────
+router.delete('/family-links/:id', async (req, res) => {
+  try {
+    const result = await query(
+      `DELETE FROM family_links
+       WHERE id = $1 AND (inviter_id = $2 OR invitee_id = $2)
+       RETURNING id`,
+      [req.params.id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return errorResponse(res, 404, 'Family link not found');
+    }
+
+    successResponse(res, { message: 'Family member removed' });
+  } catch (error) {
+    console.error('Remove family link error:', error);
+    errorResponse(res, 500, 'Failed to remove family member');
+  }
+});
+
+// ── POST /api/settings/family-links/share-list ──────────────────
+// Share a list with a family member (auto-add as collaborator)
+router.post('/family-links/share-list', async (req, res) => {
+  try {
+    const { listId, memberId } = req.body;
+    if (!listId || !memberId) {
+      return errorResponse(res, 400, 'List ID and member ID are required');
+    }
+
+    // Verify family link exists and is accepted
+    const linkCheck = await query(
+      `SELECT id FROM family_links
+       WHERE ((inviter_id = $1 AND invitee_id = $2)
+          OR (inviter_id = $2 AND invitee_id = $1))
+         AND status = 'accepted'`,
+      [req.user.id, memberId]
+    );
+
+    if (linkCheck.rows.length === 0) {
+      return errorResponse(res, 403, 'Not a linked family member');
+    }
+
+    // Verify list ownership
+    const listCheck = await query(
+      'SELECT id FROM shopping_lists WHERE id = $1 AND user_id = $2',
+      [listId, req.user.id]
+    );
+
+    if (listCheck.rows.length === 0) {
+      return errorResponse(res, 404, 'List not found or not owned by you');
+    }
+
+    // Add as collaborator
+    await query(
+      `INSERT INTO list_collaborators (list_id, user_id, role)
+       VALUES ($1, $2, 'editor')
+       ON CONFLICT (list_id, user_id) DO NOTHING`,
+      [listId, memberId]
+    );
+
+    successResponse(res, { message: 'List shared with family member' });
+  } catch (error) {
+    console.error('Share list with family error:', error);
+    errorResponse(res, 500, 'Failed to share list');
+  }
+});
+
 module.exports = router;
