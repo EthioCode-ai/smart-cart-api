@@ -648,10 +648,10 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
           CASE WHEN sp.price IS NOT NULL THEN 'store' ELSE 'product' END AS price_source
         FROM products p
         LEFT JOIN LATERAL (
-          SELECT price, regular_price 
-          FROM store_prices 
+          SELECT price, regular_price, unit_price
+          FROM store_prices
           WHERE barcode = p.barcode
-          ORDER BY updated_at DESC 
+          ORDER BY updated_at DESC
           LIMIT 1
         ) sp ON true
         WHERE LOWER(p.name) LIKE $1
