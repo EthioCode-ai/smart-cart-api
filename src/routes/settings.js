@@ -12,6 +12,28 @@ const router = express.Router();
 // All routes require authentication
 router.use(authenticate);
 
+// ── Push Notification Helper ──
+async function sendPushNotification(userId, title, body) {
+  try {
+    const result = await query('SELECT push_token FROM users WHERE id = $1', [userId]);
+    const token = result.rows[0]?.push_token;
+    if (!token) return;
+
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: token,
+        title,
+        body,
+        sound: 'default',
+      }),
+    });
+  } catch (err) {
+    console.error('Push notification error:', err);
+  }
+}
+
 // ── GET /api/settings ───────────────────────────────────────
 
 router.get('/', async (req, res) => {
@@ -501,6 +523,14 @@ router.post('/family-links/invite', async (req, res) => {
       [req.user.id, invitee.id, relationship || null]
     );
 
+    // Send push notification to invitee
+    const inviterName = req.user.name || 'Someone';
+    await sendPushNotification(
+      invitee.id,
+      'Family Invite',
+      `${inviterName} wants to connect with you on Smart Cart`
+    );
+
     successResponse(res, {
       invite: {
         id: result.rows[0].id,
@@ -529,6 +559,14 @@ router.put('/family-links/:id/accept', async (req, res) => {
     if (result.rows.length === 0) {
       return errorResponse(res, 404, 'Invite not found or already processed');
     }
+
+    // Notify the inviter that their invite was accepted
+    const accepterName = req.user.name || 'Someone';
+    await sendPushNotification(
+      result.rows[0].inviter_id,
+      'Invite Accepted!',
+      `${accepterName} accepted your family invite on Smart Cart`
+    );
 
     successResponse(res, { message: 'Invite accepted!' });
   } catch (error) {

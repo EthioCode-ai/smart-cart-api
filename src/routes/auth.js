@@ -449,4 +449,22 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
+// ── PUT /api/auth/push-token ──────────────────────────────────
+router.put('/push-token', authenticate, async (req, res) => {
+  try {
+    const { pushToken } = req.body;
+    if (!pushToken) {
+      return res.status(400).json({ error: 'Push token is required' });
+    }
+    await query(
+      'UPDATE users SET push_token = $1 WHERE id = $2',
+      [pushToken, req.user.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Save push token error:', error);
+    res.status(500).json({ error: 'Failed to save push token' });
+  }
+});
+
 module.exports = router;
