@@ -910,7 +910,7 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
           content: [
             {
               type: 'text',
-              text: 'Read this grocery shelf price tag. Return ONLY valid JSON with no markdown:\n{"product_name": "...", "brand": null, "category": "...", "price": 0.00, "regular_price": null, "unit_price": null, "upc": null}\n\nRules:\n- price = the main shelf price customers pay (the large number)\n- regular_price = only if there is a separate higher regular/was/original price\n- unit_price = per oz/per lb/per fl oz price if shown\n- product_name = the product name on the tag\n- brand = the brand name if visible on the tag\n- category = classify as one of: produce, dairy, meat, seafood, bakery, deli, frozen, beverages, snacks, pantry, household, wine, beer, spirits, health, baby, pets, other\n- upc = barcode number if printed as digits on the tag (not QR codes)\n- All prices as numbers, not strings\n- If you cannot read a field, use null',
+              text: 'Read this grocery shelf price tag AND any visible product packaging or labels in the image. Return ONLY valid JSON with no markdown:\n{"product_name": "...", "brand": null, "category": "...", "price": 0.00, "regular_price": null, "unit_price": null, "upc": null}\n\nRules:\n- price = the main shelf price customers pay (the large number)\n- regular_price = only if there is a separate higher regular/was/original price\n- unit_price = per oz/per lb/per fl oz price if shown\n- product_name = combine info from BOTH the shelf tag AND visible product packaging to give the full, human-readable product name (e.g., if tag says "CON TOM SAUCE" and package says "Contadina", return "Contadina Tomato Sauce")\n- brand = the brand name from product packaging first, shelf tag second\n- category = classify as one of: produce, dairy, meat, seafood, bakery, deli, frozen, beverages, snacks, pantry, household, wine, beer, spirits, health, baby, pets, other\n- upc = barcode number if printed as digits on the tag (not QR codes)\n- All prices as numbers, not strings\n- If you cannot read a field, use null\n- IMPORTANT: Expand abbreviations (CON = Contadina, TOM = Tomato, CKN = Chicken, etc.)',
             },
             {
               type: 'image_url',
@@ -929,10 +929,40 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
     const cleaned = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(cleaned);
 
+    let finalName = parsed.product_name || null;
+    let finalBrand = parsed.brand || null;
+    let finalCategory = parsed.category || null;
+
+    // Fuzzy match against products database if Vision returned a name
+    if (finalName) {
+      try {
+        const fuzzyResult = await query(
+          `SELECT name, brand, category, similarity(LOWER(name), LOWER($1)) AS sim
+           FROM products
+           WHERE similarity(LOWER(name), LOWER($1)) > 0.25
+           ORDER BY sim DESC
+           LIMIT 1`,
+          [finalName]
+        );
+        if (fuzzyResult.rows.length > 0) {
+          const match = fuzzyResult.rows[0];
+          // Use database name if it's a strong match (sim > 0.3)
+          if (match.sim > 0.3) {
+            finalName = match.name;
+            finalBrand = finalBrand || match.brand;
+            finalCategory = finalCategory || match.category;
+          }
+        }
+      } catch (fuzzyErr) {
+        // Fuzzy match failed — not critical, continue with Vision data
+        console.error('Fuzzy match error:', fuzzyErr.message);
+      }
+    }
+
     res.json({
-      product_name: parsed.product_name || null,
-      brand: parsed.brand || null,
-      category: parsed.category || null,
+      product_name: finalName,
+      brand: finalBrand,
+      category: finalCategory,
       price: parsed.price || null,
       regular_price: parsed.regular_price || null,
       unit_price: parsed.unit_price || null,
