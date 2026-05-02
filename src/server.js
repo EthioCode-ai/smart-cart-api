@@ -24,6 +24,7 @@ const aiRoutes = require('./routes/ai');
 const dashboardRoutes = require('./routes/dashboard');
 const storeLayoutRoutes = require('./routes/storeLayouts');
 const productsRoutes = require('./routes/products');
+const adminRoutes = require('./routes/admin');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -71,6 +72,7 @@ app.use('/api/products', productsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/store-layouts', storeLayoutRoutes);
 app.use('/api/notifications', dashboardRoutes);
+app.use('/api/admin', adminRoutes);
 
 // ── Health Check ────────────────────────────────────────────
 

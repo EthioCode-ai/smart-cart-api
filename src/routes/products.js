@@ -5,6 +5,8 @@
 const express = require('express');
 const { query, successResponse, errorResponse } = require('../models/db');
 const { optionalAuth, authenticate } = require('../middleware/auth');
+const { writeMarketPrice } = require('../services/marketPriceWriter');
+const { validatePriceWrite } = require('../utils/priceValidator');
 const router = express.Router();
 
 // ── Cloudinary Setup ─────────────────────────────────────────
@@ -100,18 +102,18 @@ router.get('/by-barcode', optionalAuth, async (req, res) => {
     if (lat && lng) {
       try {
         const mpResult = await query(
-          `SELECT price, unit_price, regular_price, latitude, longitude,
+          `SELECT price, unit_price, regular_price,
              (6371 * acos(
-               cos(radians($2)) * cos(radians(latitude)) *
-               cos(radians(longitude) - radians($3)) +
-               sin(radians($2)) * sin(radians(latitude))
+               cos(radians($2)) * cos(radians(COALESCE(anchor_latitude, latitude))) *
+               cos(radians(COALESCE(anchor_longitude, longitude)) - radians($3)) +
+               sin(radians($2)) * sin(radians(COALESCE(anchor_latitude, latitude)))
              )) AS distance_km
            FROM market_prices
            WHERE barcode = $1
              AND (6371 * acos(
-               cos(radians($2)) * cos(radians(latitude)) *
-               cos(radians(longitude) - radians($3)) +
-               sin(radians($2)) * sin(radians(latitude))
+               cos(radians($2)) * cos(radians(COALESCE(anchor_latitude, latitude))) *
+               cos(radians(COALESCE(anchor_longitude, longitude)) - radians($3)) +
+               sin(radians($2)) * sin(radians(COALESCE(anchor_latitude, latitude)))
              )) < 80.5
            ORDER BY distance_km
            LIMIT 1`,
@@ -708,14 +710,14 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
              FROM market_prices
              WHERE barcode = ANY($1)
                AND (6371 * acos(
-                 cos(radians($2)) * cos(radians(latitude)) *
-                 cos(radians(longitude) - radians($3)) +
-                 sin(radians($2)) * sin(radians(latitude))
+                 cos(radians($2)) * cos(radians(COALESCE(anchor_latitude, latitude))) *
+                 cos(radians(COALESCE(anchor_longitude, longitude)) - radians($3)) +
+                 sin(radians($2)) * sin(radians(COALESCE(anchor_latitude, latitude)))
                )) < 80.5
              ORDER BY barcode, (6371 * acos(
-                 cos(radians($2)) * cos(radians(latitude)) *
-                 cos(radians(longitude) - radians($3)) +
-                 sin(radians($2)) * sin(radians(latitude))
+                 cos(radians($2)) * cos(radians(COALESCE(anchor_latitude, latitude))) *
+                 cos(radians(COALESCE(anchor_longitude, longitude)) - radians($3)) +
+                 sin(radians($2)) * sin(radians(COALESCE(anchor_latitude, latitude)))
                ))`,
             [barcodes, parseFloat(lat), parseFloat(lng)]
           );
@@ -759,10 +761,35 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
 
     let saved = 0;
     let pricesUpdated = 0;
+    // Per-row outcomes — surfaced in response so the client can see what
+    // got accepted, quarantined, or failed (Part D).
+    const results = [];
 
     for (const product of products) {
       const { barcode, name, price, regularPrice, source, imageUrl } = product;
       if (!barcode) continue;
+
+      const rowResult = {
+        barcode,
+        products: null,
+        storePrice: null,
+        marketPrice: null,
+      };
+
+      // ── Pre-validation: gate products.price on bounds + confidence (Part C) ──
+      // The writer does full validation (incl. delta) inside its own transaction.
+      // This pre-check protects the products.price fallback used by /by-barcode
+      // when no zone match exists, so a low-confidence / out-of-bounds scan
+      // never poisons that read path.
+      const preValidation = validatePriceWrite({
+        barcode,
+        price,
+        confidence: product.confidence,
+        source,
+      });
+      // If pre-validation fails, pass null — the upsert's `CASE WHEN $5 > 0`
+      // clause then preserves the existing products.price.
+      const productsPriceArg = preValidation.decision === 'accept' ? (price || 0) : null;
 
       try {
         await query(
@@ -775,12 +802,16 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
              price = CASE WHEN $5 > 0 THEN $5 ELSE products.price END,
              image_url = COALESCE(NULLIF($6, ''), products.image_url),
              updated_at = NOW()`,
-          [barcode, name || null, product.brand || null, product.category || null, price || 0, imageUrl || null]
+          [barcode, name || null, product.brand || null, product.category || null, productsPriceArg, imageUrl || null]
         );
         saved++;
-        if (price > 0) pricesUpdated++;
+        if (productsPriceArg && productsPriceArg > 0) pricesUpdated++;
+        rowResult.products = preValidation.decision === 'accept'
+          ? 'ok'
+          : `metadata_only:${preValidation.reason}`;
       } catch (insertErr) {
         console.error(`Batch insert error for ${barcode}:`, insertErr.message);
+        rowResult.products = `error:${insertErr.message}`;
       }
 
       if (storeId && price > 0) {
@@ -798,17 +829,53 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
                updated_at = NOW()`,
             [storeId, barcode, price, regularPrice || null, product.unitPrice || null, aisleNumber || null, source || 'walk_scan', req.user?.id || null]
           );
+          rowResult.storePrice = 'ok';
         } catch (priceErr) {
           if (priceErr.code !== '42P01') {
             console.error(`Store price insert error for ${barcode}:`, priceErr.message);
           }
+          rowResult.storePrice = `error:${priceErr.message}`;
         }
+      } else {
+        rowResult.storePrice = !storeId ? 'skipped:no_store' : 'skipped:no_price';
       }
 
-      // ── Market pricing (50-mile zones) ──
+      // ── Market pricing (50-mile zones) — transactional writer ──
       if (latitude && longitude && price > 0) {
         try {
-          // Find existing market price within 50 miles (~80.5 km)
+          const writerResult = await writeMarketPrice({
+            barcode,
+            price,
+            unitPrice: product.unitPrice,
+            regularPrice: regularPrice || null,
+            latitude,
+            longitude,
+            source: source || 'walk_scan',
+            scannedBy: req.user?.id || null,
+            confidence: product.confidence,
+          });
+          rowResult.marketPrice = {
+            decision: writerResult.decision,
+            reason: writerResult.reason,
+          };
+        } catch (marketErr) {
+          console.error(`Market price error for ${barcode}:`, marketErr.message);
+          rowResult.marketPrice = { decision: 'error', reason: marketErr.message };
+        }
+      } else {
+        rowResult.marketPrice = {
+          decision: 'skipped',
+          reason: !latitude || !longitude ? 'no_location' : 'no_price',
+        };
+      }
+
+      // ── ROLLBACK SAFETY ─────────────────────────────────────────────────
+      // The previous inline market_prices block is preserved below for one
+      // deploy. To revert: comment out the writeMarketPrice block above and
+      // uncomment this block. REMOVE on next deploy after verifying writer
+      // is stable in production.
+      /* if (latitude && longitude && price > 0) {
+        try {
           const marketResult = await query(
             `SELECT id, price FROM market_prices
              WHERE barcode = $1
@@ -825,9 +892,7 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
              LIMIT 1`,
             [barcode, latitude, longitude]
           );
-
           if (marketResult.rows.length === 0) {
-            // No market within 50 miles → INSERT new market
             await query(
               `INSERT INTO market_prices (barcode, price, unit_price, regular_price, latitude, longitude, source, scanned_by)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -836,7 +901,6 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
           } else {
             const existing = marketResult.rows[0];
             if (parseFloat(existing.price) !== parseFloat(price)) {
-              // Price changed → UPDATE + move center
               await query(
                 `UPDATE market_prices SET
                    price = $1, unit_price = $2, regular_price = $3,
@@ -846,14 +910,15 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
                 [price, product.unitPrice || null, regularPrice || null, latitude, longitude, req.user?.id || null, existing.id]
               );
             }
-            // Same price → SKIP
           }
         } catch (marketErr) {
           console.error(`Market price error for ${barcode}:`, marketErr.message);
         }
-      }
+      } */
+
+      results.push(rowResult);
     }
-    successResponse(res, { saved, pricesUpdated, total: products.length });
+    successResponse(res, { saved, pricesUpdated, total: products.length, results });
   } catch (error) {
     console.error('Batch price error:', error);
     errorResponse(res, 500, 'Failed to save batch prices');
@@ -910,7 +975,7 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
           content: [
             {
               type: 'text',
-              text: 'Read this grocery shelf price tag AND any visible product packaging or labels in the image. Return ONLY valid JSON with no markdown:\n{"product_name": "...", "brand": null, "category": "...", "price": 0.00, "regular_price": null, "unit_price": null, "upc": null}\n\nRules:\n- price = the main shelf price customers pay (the large number)\n- regular_price = only if there is a separate higher regular/was/original price\n- unit_price = per oz/per lb/per fl oz price if shown\n- product_name = combine info from BOTH the shelf tag AND visible product packaging to give the full, human-readable product name (e.g., if tag says "CON TOM SAUCE" and package says "Contadina", return "Contadina Tomato Sauce")\n- brand = the brand name from product packaging first, shelf tag second\n- category = classify as one of: produce, dairy, meat, seafood, bakery, deli, frozen, beverages, snacks, pantry, household, wine, beer, spirits, health, baby, pets, other\n- upc = barcode number if printed as digits on the tag (not QR codes)\n- All prices as numbers, not strings\n- If you cannot read a field, use null\n- IMPORTANT: Expand abbreviations (CON = Contadina, TOM = Tomato, CKN = Chicken, etc.)',
+              text: 'Read this grocery shelf price tag AND any visible product packaging or labels in the image. Return ONLY valid JSON with no markdown:\n{"product_name": "...", "brand": null, "category": "...", "price": 0.00, "regular_price": null, "unit_price": null, "upc": null, "confidence": 0.0}\n\nRules:\n- price = the main shelf price customers pay (the large number)\n- regular_price = only if there is a separate higher regular/was/original price\n- unit_price = per oz/per lb/per fl oz price if shown\n- product_name = combine info from BOTH the shelf tag AND visible product packaging to give the full, human-readable product name (e.g., if tag says "CON TOM SAUCE" and package says "Contadina", return "Contadina Tomato Sauce")\n- brand = the brand name from product packaging first, shelf tag second\n- category = classify as one of: produce, dairy, meat, seafood, bakery, deli, frozen, beverages, snacks, pantry, household, wine, beer, spirits, health, baby, pets, other\n- upc = barcode number if printed as digits on the tag (not QR codes)\n- confidence = your honest 0.0-1.0 certainty about the PRICE you returned. Calibrate as: 0.95+ for sharp, clearly-readable shelf tag with matching packaging; 0.80-0.95 for clear price but partial info; 0.60-0.80 for partial/uncertain reads where the digits are slightly blurry or you had to infer; below 0.60 if you are guessing because the tag is obscured, glared, or you cannot clearly see the price digits. Be honest — false confidence poisons the price database for every user nationwide.\n- All prices as numbers, not strings\n- If you cannot read a field, use null (but ALWAYS return a confidence number, never null)\n- IMPORTANT: Expand abbreviations (CON = Contadina, TOM = Tomato, CKN = Chicken, etc.)',
             },
             {
               type: 'image_url',
@@ -959,6 +1024,14 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
       }
     }
 
+    // Normalize confidence: clamp to [0, 1], or null if not a finite number.
+    // The validator treats null as "missing" and degrades to assumed-good
+    // (0.85 default), so an old GPT response without confidence still works.
+    const rawConf = Number(parsed.confidence);
+    const confidence = Number.isFinite(rawConf)
+      ? Math.max(0, Math.min(1, rawConf))
+      : null;
+
     res.json({
       product_name: finalName,
       brand: finalBrand,
@@ -967,6 +1040,7 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
       regular_price: parsed.regular_price || null,
       unit_price: parsed.unit_price || null,
       upc: parsed.upc || null,
+      confidence,
       source: 'gpt_vision',
     });
   } catch (err) {

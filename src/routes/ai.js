@@ -707,14 +707,14 @@ Important rules:
                   `SELECT price FROM market_prices
                    WHERE barcode = $1
                      AND (6371 * acos(
-                       cos(radians($2)) * cos(radians(latitude)) *
-                       cos(radians(longitude) - radians($3)) +
-                       sin(radians($2)) * sin(radians(latitude))
+                       cos(radians($2)) * cos(radians(COALESCE(anchor_latitude, latitude))) *
+                       cos(radians(COALESCE(anchor_longitude, longitude)) - radians($3)) +
+                       sin(radians($2)) * sin(radians(COALESCE(anchor_latitude, latitude)))
                      )) < 80.5
                    ORDER BY (6371 * acos(
-                       cos(radians($2)) * cos(radians(latitude)) *
-                       cos(radians(longitude) - radians($3)) +
-                       sin(radians($2)) * sin(radians(latitude))
+                       cos(radians($2)) * cos(radians(COALESCE(anchor_latitude, latitude))) *
+                       cos(radians(COALESCE(anchor_longitude, longitude)) - radians($3)) +
+                       sin(radians($2)) * sin(radians(COALESCE(anchor_latitude, latitude)))
                      ))
                    LIMIT 1`,
                   [prod.barcode, userLat, userLng]
