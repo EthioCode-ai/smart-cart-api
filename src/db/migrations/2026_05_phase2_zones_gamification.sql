@@ -40,14 +40,28 @@
 BEGIN;
 
 -- ────────────────────────────────────────────────────────────────
--- 1. aisle_side on store_aisles
+-- 1. aisle_side on store_aisles  (locked convention: 'left'/'right')
 -- ────────────────────────────────────────────────────────────────
--- Walmart-style: aisle 14 might be 'chips' on north side and 'cookies' on south.
+-- Walmart-style: aisle 14 might be 'chips' on left and 'cookies' on right.
 -- Two rows in store_aisles, same (store_id, aisle_number), different aisle_side.
--- NULL means whole-aisle (one department spans both sides).
+-- NULL = whole aisle (one department spans both sides; the default case).
+--
+-- Convention: 'left'/'right' RELATIVE to a shopper walking the aisle from
+-- its primary entrance end. Language-neutral, no compass dependency, no
+-- store-orientation ambiguity. Enforced via CHECK constraint to prevent
+-- free-form drift ('Left', 'L', 'east', 'side-A', etc.) across GPT Vision
+-- prompt iterations and frontend code paths.
+--
+-- The GPT Vision prompt and marketZoneWriter.js MUST both emit/expect this
+-- exact lowercase 'left'/'right' tokens. Document at every read/write site.
 ALTER TABLE store_aisles
   ADD COLUMN IF NOT EXISTS aisle_side VARCHAR(16);
-    -- 'north' | 'south' | 'east' | 'west' | NULL (whole aisle)
+
+ALTER TABLE store_aisles
+  DROP CONSTRAINT IF EXISTS store_aisles_aisle_side_check;
+ALTER TABLE store_aisles
+  ADD CONSTRAINT store_aisles_aisle_side_check
+  CHECK (aisle_side IS NULL OR aisle_side IN ('left', 'right'));
 
 -- ────────────────────────────────────────────────────────────────
 -- 2. Relax UNIQUE constraint to allow per-side rows
