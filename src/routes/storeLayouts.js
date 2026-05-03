@@ -7,6 +7,12 @@
 const express = require('express');
 const { query, transaction, successResponse, errorResponse } = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const {
+  POINT_VALUES,
+  awardPoints,
+  checkFirstStoreBonus,
+  checkBadges,
+} = require('../services/pointsService');
 
 const router = express.Router();
 
@@ -14,17 +20,7 @@ const router = express.Router();
 router.use(authenticate);
 
 // ── CONSTANTS ───────────────────────────────────────────────
-
-const POINT_VALUES = {
-  aisle_scan: 50,
-  aisle_manual: 30,
-  aisle_confirm: 10,
-  data_report: 15,
-  entrance_map: 25,
-  first_store_bonus: 200,
-  store_complete_bonus: 500,
-  streak_bonus: 25,
-};
+// (POINT_VALUES moved to pointsService — see module imports above.)
 
 const CONFIDENCE_INCREMENT = 5.0;   // Each confirmation adds this
 const CONFIDENCE_DECREMENT = 10.0;  // Each report subtracts this
@@ -32,60 +28,9 @@ const CONFIDENCE_INITIAL = 50.0;    // Starting confidence for new data
 const STALE_DAYS = 90;              // Data older than this gets reduced confidence
 
 // ── HELPERS ─────────────────────────────────────────────────
-
-// Award points to a user and return the new total
-const awardPoints = async (userId, points, reason, contributionId = null, storeId = null) => {
-  // Insert transaction record
-  await query(
-    `INSERT INTO point_transactions (user_id, points, reason, contribution_id, store_id)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [userId, points, reason, contributionId, storeId]
-  );
-
-  // Upsert user_points
-  const result = await query(
-    `INSERT INTO user_points (user_id, total_points, contributions_count, last_contribution_at)
-     VALUES ($1, $2, 1, NOW())
-     ON CONFLICT (user_id)
-     DO UPDATE SET
-       total_points = user_points.total_points + $2,
-       contributions_count = user_points.contributions_count + 1,
-       last_contribution_at = NOW(),
-       updated_at = NOW()
-     RETURNING total_points, contributions_count`,
-    [userId, points]
-  );
-
-  const totalPoints = result.rows[0].total_points;
-
-  // Check and update level
-  const levelResult = await query(
-    `SELECT level, title FROM level_thresholds
-     WHERE min_points <= $1
-     ORDER BY level DESC LIMIT 1`,
-    [totalPoints]
-  );
-
-  if (levelResult.rows.length > 0) {
-    const newLevel = levelResult.rows[0].level;
-    await query(
-      `UPDATE user_points SET level = $1 WHERE user_id = $2 AND level < $1`,
-      [newLevel, userId]
-    );
-  }
-
-  return { totalPoints, points };
-};
-
-// Check if user is first to map this store
-const checkFirstStoreBonus = async (userId, storeId) => {
-  const existing = await query(
-    `SELECT COUNT(*) as count FROM layout_contributions
-     WHERE store_id = $1 AND user_id != $2`,
-    [storeId, userId]
-  );
-  return parseInt(existing.rows[0].count) === 0;
-};
+// (awardPoints + checkFirstStoreBonus + checkBadges moved to
+//  pointsService — see module imports above. matchDepartments and
+//  updateStoreStats are layout-specific and stay here.)
 
 // Update store layout stats
 const updateStoreStats = async (storeId) => {
@@ -155,74 +100,6 @@ const matchDepartments = async (ocrText) => {
   }
 
   return [...new Set(matched)]; // deduplicate
-};
-
-// Check and award badges
-const checkBadges = async (userId, storeId) => {
-  const badges = [];
-
-  // Store Expert: mapped 80%+ of a store
-  const statsResult = await query(
-    `SELECT total_aisles, mapped_aisles FROM store_layout_stats WHERE store_id = $1`,
-    [storeId]
-  );
-
-  if (statsResult.rows.length > 0) {
-    const stats = statsResult.rows[0];
-    if (stats.total_aisles > 0 && (stats.mapped_aisles / stats.total_aisles) >= 0.8) {
-      const badgeResult = await query(
-        `INSERT INTO user_badges (user_id, badge_type, badge_name, badge_description, store_id)
-         VALUES ($1, 'store_expert', 'Store Expert', 'Mapped 80% or more of a store layout', $2)
-         ON CONFLICT (user_id, badge_type, store_id) DO NOTHING
-         RETURNING *`,
-        [userId, storeId]
-      );
-      if (badgeResult.rows.length > 0) badges.push(badgeResult.rows[0]);
-    }
-  }
-
-  // First Explorer: first contribution ever
-  const pointsResult = await query(
-    `SELECT contributions_count FROM user_points WHERE user_id = $1`,
-    [userId]
-  );
-
-  if (pointsResult.rows.length > 0 && pointsResult.rows[0].contributions_count === 1) {
-    const badgeResult = await query(
-      `INSERT INTO user_badges (user_id, badge_type, badge_name, badge_description)
-       VALUES ($1, 'first_explorer', 'First Explorer', 'Made your first store layout contribution')
-       ON CONFLICT (user_id, badge_type, store_id) DO NOTHING
-       RETURNING *`,
-      [userId]
-    );
-    if (badgeResult.rows.length > 0) badges.push(badgeResult.rows[0]);
-  }
-
-  // 10 Contributions
-  if (pointsResult.rows.length > 0 && pointsResult.rows[0].contributions_count >= 10) {
-    const badgeResult = await query(
-      `INSERT INTO user_badges (user_id, badge_type, badge_name, badge_description)
-       VALUES ($1, 'contributor_10', 'Dedicated Mapper', 'Made 10 store layout contributions')
-       ON CONFLICT (user_id, badge_type, store_id) DO NOTHING
-       RETURNING *`,
-      [userId]
-    );
-    if (badgeResult.rows.length > 0) badges.push(badgeResult.rows[0]);
-  }
-
-  // 50 Contributions
-  if (pointsResult.rows.length > 0 && pointsResult.rows[0].contributions_count >= 50) {
-    const badgeResult = await query(
-      `INSERT INTO user_badges (user_id, badge_type, badge_name, badge_description)
-       VALUES ($1, 'contributor_50', 'Master Cartographer', 'Made 50 store layout contributions')
-       ON CONFLICT (user_id, badge_type, store_id) DO NOTHING
-       RETURNING *`,
-      [userId]
-    );
-    if (badgeResult.rows.length > 0) badges.push(badgeResult.rows[0]);
-  }
-
-  return badges;
 };
 
 // ═════════════════════════════════════════════════════════════
