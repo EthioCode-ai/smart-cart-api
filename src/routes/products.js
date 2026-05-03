@@ -998,29 +998,42 @@ router.post('/ocr-vision', authenticate, async (req, res) => {
     let finalBrand = parsed.brand || null;
     let finalCategory = parsed.category || null;
 
-    // Fuzzy match against products database if Vision returned a name
+    // Fuzzy match against products database if Vision returned a name.
+    // Capped at 100ms via Promise.race so a slow pg_trgm query never blocks
+    // the scan response. If it times out, the client gets the raw Vision
+    // result; the next /lookup or /batch-price call will still benefit
+    // from the fuzzy enrichment via the products table cache.
     if (finalName) {
-      try {
-        const fuzzyResult = await query(
-          `SELECT name, brand, category, similarity(LOWER(name), LOWER($1)) AS sim
-           FROM products
-           WHERE similarity(LOWER(name), LOWER($1)) > 0.25
-           ORDER BY sim DESC
-           LIMIT 1`,
-          [finalName]
-        );
-        if (fuzzyResult.rows.length > 0) {
-          const match = fuzzyResult.rows[0];
-          // Use database name if it's a strong match (sim > 0.3)
-          if (match.sim > 0.3) {
-            finalName = match.name;
-            finalBrand = finalBrand || match.brand;
-            finalCategory = finalCategory || match.category;
+      const FUZZY_TIMEOUT_MS = 100;
+      const fuzzyPromise = (async () => {
+        try {
+          const fuzzyResult = await query(
+            `SELECT name, brand, category, similarity(LOWER(name), LOWER($1)) AS sim
+             FROM products
+             WHERE similarity(LOWER(name), LOWER($1)) > 0.25
+             ORDER BY sim DESC
+             LIMIT 1`,
+            [finalName]
+          );
+          if (fuzzyResult.rows.length > 0 && fuzzyResult.rows[0].sim > 0.3) {
+            return fuzzyResult.rows[0];
           }
+        } catch (fuzzyErr) {
+          console.error('Fuzzy match error:', fuzzyErr.message);
         }
-      } catch (fuzzyErr) {
-        // Fuzzy match failed — not critical, continue with Vision data
-        console.error('Fuzzy match error:', fuzzyErr.message);
+        return null;
+      })();
+      const TIMEOUT_SENTINEL = '__fuzzy_timeout__';
+      const result = await Promise.race([
+        fuzzyPromise,
+        new Promise((resolve) => setTimeout(() => resolve(TIMEOUT_SENTINEL), FUZZY_TIMEOUT_MS)),
+      ]);
+      if (result && result !== TIMEOUT_SENTINEL) {
+        finalName = result.name;
+        finalBrand = finalBrand || result.brand;
+        finalCategory = finalCategory || result.category;
+      } else if (result === TIMEOUT_SENTINEL) {
+        console.warn(`[ocr-vision] fuzzy match exceeded ${FUZZY_TIMEOUT_MS}ms, returning raw Vision name`);
       }
     }
 
