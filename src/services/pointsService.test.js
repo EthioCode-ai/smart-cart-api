@@ -39,6 +39,12 @@ describe('POINT_VALUES', () => {
     expect(POINT_VALUES.store_complete_bonus).toBe(500);
     expect(POINT_VALUES.streak_bonus).toBe(25);
   });
+
+  test('exports the price-side seed values (PACS gamification)', () => {
+    expect(POINT_VALUES.price_scan).toBe(10);
+    expect(POINT_VALUES.price_confirm).toBe(2);
+    expect(POINT_VALUES.price_stale_report).toBe(5);
+  });
 });
 
 // ── awardPoints ────────────────────────────────────────────

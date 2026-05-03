@@ -26,6 +26,7 @@ const { query } = require('../models/db');
 // Mirror of `point_values` table seed values. NOTE: this is duplicated
 // data; DB is the source of truth long-term. See cleanup note above.
 const POINT_VALUES = {
+  // Layout-side actions (existing)
   aisle_scan: 50,
   aisle_manual: 30,
   aisle_confirm: 10,
@@ -34,6 +35,10 @@ const POINT_VALUES = {
   first_store_bonus: 200,
   store_complete_bonus: 500,
   streak_bonus: 25,
+  // Price-side actions (Phase 2 PR 2 commit 3 — PACS gamification)
+  price_scan: 10,
+  price_confirm: 2,
+  price_stale_report: 5,
 };
 
 // ── awardPoints ─────────────────────────────────────────────

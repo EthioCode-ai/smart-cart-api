@@ -7,6 +7,8 @@ const { query, successResponse, errorResponse } = require('../models/db');
 const { optionalAuth, authenticate } = require('../middleware/auth');
 const { writeMarketPrice } = require('../services/marketPriceWriter');
 const { validatePriceWrite } = require('../utils/priceValidator');
+const { awardPoints, POINT_VALUES } = require('../services/pointsService');
+const fraudDetector = require('../services/fraudDetector');
 const router = express.Router();
 
 // ── Cloudinary Setup ─────────────────────────────────────────
@@ -759,6 +761,15 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
       return errorResponse(res, 400, 'Products array is required');
     }
 
+    // ── Anti-fraud passive check (fire-and-forget) ──
+    // Layer 2 of the Phase 2 anti-fraud design: log suspicious patterns
+    // at write-paths but do NOT enforce. Enforcement decisions come later
+    // after we see what real signals look like.
+    if (req.user?.id) {
+      fraudDetector.analyzeAndLog(req.user.id, { action: 'price_scan' })
+        .catch(err => console.error('[fraud] analyzeAndLog failed:', err.message));
+    }
+
     let saved = 0;
     let pricesUpdated = 0;
     // Per-row outcomes — surfaced in response so the client can see what
@@ -858,6 +869,27 @@ router.post('/batch-price', optionalAuth, async (req, res) => {
             decision: writerResult.decision,
             reason: writerResult.reason,
           };
+
+          // ── PACS gamification: award points for accepted/promoted scans ──
+          // No reward for quarantine/reject/skipped/error - low-quality data
+          // shouldn't earn points. (PR 2 commit 3.) Wrapped to never fail
+          // the batch if points fail; logged for observability.
+          const decision = writerResult.decision;
+          if (req.user?.id && (decision === 'accept' || decision === 'promoted')) {
+            try {
+              await awardPoints(
+                req.user.id,
+                POINT_VALUES.price_scan,
+                'price_scan',
+                null,        // contribution_id - layout-only concept
+                storeId || null,
+              );
+              rowResult.pointsAwarded = POINT_VALUES.price_scan;
+            } catch (pointsErr) {
+              console.error('[points] awardPoints failed for price_scan:', pointsErr.message);
+              rowResult.pointsAwarded = 0;
+            }
+          }
         } catch (marketErr) {
           console.error(`Market price error for ${barcode}:`, marketErr.message);
           rowResult.marketPrice = { decision: 'error', reason: marketErr.message };
