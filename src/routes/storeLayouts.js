@@ -244,11 +244,19 @@ router.get('/:storeId', async (req, res) => {
 router.post('/:storeId/aisles', async (req, res) => {
   try {
     const { storeId } = req.params;
-    const { aisleNumber, aisleLabel, departments, positionIndex } = req.body;
+    const { aisleNumber, aisleLabel, departments, positionIndex, aisleSide } = req.body;
 
     if (!aisleNumber) {
       return errorResponse(res, 400, 'Aisle number is required');
     }
+
+    // Normalize aisleSide to the locked 'left'/'right'/null convention.
+    // Defends against client-side casing drift; the DB CHECK constraint
+    // would reject anything else, but normalizing avoids a constraint
+    // violation round-trip.
+    const normalizedSide = ['left', 'right'].includes((aisleSide || '').toLowerCase())
+      ? aisleSide.toLowerCase()
+      : null;
 
     // Verify store exists
     const storeCheck = await query('SELECT id FROM stores WHERE id = $1', [storeId]);
@@ -257,10 +265,11 @@ router.post('/:storeId/aisles', async (req, res) => {
     }
 
     const result = await transaction(async (client) => {
-      // Check if aisle already exists
+      // Check if aisle already exists. IS NOT DISTINCT FROM matches NULL=NULL,
+      // mirroring the UNIQUE NULLS NOT DISTINCT constraint semantics.
       const existing = await client.query(
-        'SELECT id FROM store_aisles WHERE store_id = $1 AND aisle_number = $2',
-        [storeId, aisleNumber.toString()]
+        'SELECT id FROM store_aisles WHERE store_id = $1 AND aisle_number = $2 AND aisle_side IS NOT DISTINCT FROM $3',
+        [storeId, aisleNumber.toString(), normalizedSide]
       );
 
       let aisleId;
@@ -283,10 +292,10 @@ router.post('/:storeId/aisles', async (req, res) => {
         // Create new aisle
         isNew = true;
         const aisleResult = await client.query(
-          `INSERT INTO store_aisles (store_id, aisle_number, aisle_label, position_index, confidence_score, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO store_aisles (store_id, aisle_number, aisle_label, aisle_side, position_index, confidence_score, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id`,
-          [storeId, aisleNumber.toString(), aisleLabel, positionIndex, CONFIDENCE_INITIAL, req.user.id]
+          [storeId, aisleNumber.toString(), aisleLabel, normalizedSide, positionIndex, CONFIDENCE_INITIAL, req.user.id]
         );
         aisleId = aisleResult.rows[0].id;
       }
@@ -370,13 +379,20 @@ router.post('/:storeId/aisles', async (req, res) => {
 router.post('/:storeId/aisles/scan', async (req, res) => {
   try {
     const { storeId } = req.params;
-    const { aisleNumber, ocrConfidence, imageUrl } = req.body;
+    const { aisleNumber, ocrConfidence, imageUrl, aisleSide } = req.body;
     // Truncate OCR text to fit VARCHAR(255) column
     const ocrText = (req.body.ocrText || '').substring(0, 250);
 
     if (!aisleNumber || !ocrText) {
       return errorResponse(res, 400, 'Aisle number and OCR text are required');
     }
+
+    // Normalize aisleSide to the locked 'left'/'right'/null convention.
+    // The DB CHECK constraint would reject anything else; normalize first
+    // to avoid a constraint-violation round-trip.
+    const normalizedSide = ['left', 'right'].includes((aisleSide || '').toLowerCase())
+      ? aisleSide.toLowerCase()
+      : null;
 
     // Verify store exists
     const storeCheck = await query('SELECT id FROM stores WHERE id = $1', [storeId]);
@@ -388,19 +404,24 @@ router.post('/:storeId/aisles/scan', async (req, res) => {
     const matchedDepartments = await matchDepartments(ocrText);
 
     const result = await transaction(async (client) => {
-      // Upsert aisle
+      // Upsert aisle. ON CONFLICT target updated to match the new
+      // UNIQUE NULLS NOT DISTINCT (store_id, aisle_number, aisle_side)
+      // constraint installed by the Phase 2 PR 1 migration. The OLD
+      // (store_id, aisle_number) constraint is gone — leaving the OLD
+      // ON CONFLICT clause in place would cause runtime errors on any
+      // aisle scan after that migration ran.
       const aisleResult = await client.query(
-        `INSERT INTO store_aisles (store_id, aisle_number, aisle_label, confidence_score, created_by)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (store_id, aisle_number)
+        `INSERT INTO store_aisles (store_id, aisle_number, aisle_label, aisle_side, confidence_score, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (store_id, aisle_number, aisle_side)
          DO UPDATE SET
-           confidence_score = LEAST(store_aisles.confidence_score + $6, 100),
+           confidence_score = LEAST(store_aisles.confidence_score + $7, 100),
            aisle_label = COALESCE($3, store_aisles.aisle_label),
            verified_count = store_aisles.verified_count + 1,
            last_verified_at = NOW(),
            updated_at = NOW()
          RETURNING id, (xmax = 0) as is_new`,
-        [storeId, aisleNumber.toString(), ocrText, CONFIDENCE_INITIAL + 10, req.user.id, CONFIDENCE_INCREMENT + 5]
+        [storeId, aisleNumber.toString(), ocrText, normalizedSide, CONFIDENCE_INITIAL + 10, req.user.id, CONFIDENCE_INCREMENT + 5]
       );
 
       const aisleId = aisleResult.rows[0].id;
