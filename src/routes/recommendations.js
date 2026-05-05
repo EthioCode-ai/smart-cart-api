@@ -102,12 +102,16 @@ router.get('/where-to-shop', async (req, res) => {
     }
 
     // 2. ALLERGEN/DIETARY SAFETY GATE
+    // Message refined 2026-05-05 per Avi: acknowledge v1.1 timeline so
+    // affected users see this as a known-coming feature, not a wall.
+    // Reason key + actions kept stable so the frontend's switch doesn't
+    // re-render on copy changes.
     if (gate.householdRestrictionCount > 0) {
       return successResponse(res, {
         enabled: true,
         blocked: true,
         reason: 'allergen_safety_unavailable',
-        message: "We can't safely recommend stores for this list yet — allergen filtering coming soon",
+        message: "Allergen filtering is coming in our next update — until then we can't safely recommend stores for households with allergens recorded.",
         actions: ['disable_allergen_tracking', 'wait'],
       });
     }

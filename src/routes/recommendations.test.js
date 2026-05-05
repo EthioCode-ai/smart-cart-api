@@ -127,7 +127,7 @@ describe('GATE 2 — allergen safety', () => {
       enabled: true,
       blocked: true,
       reason: 'allergen_safety_unavailable',
-      message: "We can't safely recommend stores for this list yet — allergen filtering coming soon",
+      message: "Allergen filtering is coming in our next update — until then we can't safely recommend stores for households with allergens recorded.",
       actions: ['disable_allergen_tracking', 'wait'],
     });
     expect(recommendationService.getRecommendations).not.toHaveBeenCalled();
