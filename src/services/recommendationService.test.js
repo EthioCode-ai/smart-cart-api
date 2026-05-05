@@ -23,9 +23,10 @@ beforeEach(() => {
 
 // ── Pure helpers ──────────────────────────────────────────
 describe('_normalizePacs', () => {
-  test('NULL → 0.5', () => {
-    expect(svc._normalizePacs(null)).toBe(0.5);
-    expect(svc._normalizePacs(undefined)).toBe(0.5);
+  test('NULL → 0.39 (just below PACS gate, gates legacy rows out by default)', () => {
+    expect(svc._normalizePacs(null)).toBe(0.39);
+    expect(svc._normalizePacs(undefined)).toBe(0.39);
+    expect(svc._normalizePacs(null)).toBeLessThan(svc.PACS_GATE);
   });
   test('0–1 stays as-is', () => {
     expect(svc._normalizePacs(0.7)).toBe(0.7);
@@ -33,8 +34,8 @@ describe('_normalizePacs', () => {
   test('0–100 normalized to 0–1', () => {
     expect(svc._normalizePacs(85)).toBeCloseTo(0.85, 5);
   });
-  test('non-numeric → 0.5', () => {
-    expect(svc._normalizePacs('not a number')).toBe(0.5);
+  test('non-numeric → 0.39', () => {
+    expect(svc._normalizePacs('not a number')).toBe(0.39);
   });
 });
 
@@ -66,6 +67,14 @@ describe('_substitutionScore', () => {
     const fresh = svc._substitutionScore({ similarity: 0.8, pacs: 0.8, scanCount: 1, updatedAt: new Date() });
     const stale = svc._substitutionScore({ similarity: 0.8, pacs: 0.8, scanCount: 1, updatedAt: new Date(Date.now() - 60 * 86400000) });
     expect(fresh).toBeGreaterThan(stale);
+  });
+  test('scan_count meaningfully differentiates: 50x corroboration beats 1x fluke', () => {
+    // sim/pacs/recency held equal; only scan_count differs.
+    const fluke   = svc._substitutionScore({ similarity: 0.9, pacs: 0.9, scanCount: 1,  updatedAt: new Date() });
+    const proven  = svc._substitutionScore({ similarity: 0.9, pacs: 0.9, scanCount: 50, updatedAt: new Date() });
+    expect(proven).toBeGreaterThan(fluke);
+    // log10(60)/log10(11) ≈ 1.71 — should be ~70% higher
+    expect(proven / fluke).toBeGreaterThan(1.6);
   });
 });
 
@@ -110,12 +119,33 @@ describe('matchItemAtStore', () => {
     query.mockResolvedValueOnce({
       rows: [
         { price: '5.99', unit_price: '5.99', confidence: 0.8, updated_at: new Date(),
-          product_name: 'Organic Whole Milk', sim: '0.82' },
+          product_name: 'Organic Whole Milk', sim: '0.82', scan_count: '12' },
       ],
     });
     const m = await svc.matchItemAtStore({ item: { name: 'whole milk' }, storeId: 'S1' });
     expect(m).toMatchObject({ matched: true, tier: 3, source: 'substitute' });
     expect(m.substitute).toMatchObject({ from: 'whole milk', to: 'Organic Whole Milk' });
+  });
+
+  test('Tier 3: SQL LEFT JOINs market_prices for scan_count', async () => {
+    query.mockResolvedValueOnce({ rows: [] }); // T1 miss
+    query.mockResolvedValueOnce({ rows: [] }); // T3 returns nothing — we just lock in the SQL shape
+    await svc.matchItemAtStore({ item: { name: 'milk' }, storeId: 'S1' });
+    const t3sql = query.mock.calls[1][0];
+    expect(t3sql).toMatch(/LEFT JOIN market_prices mp/);
+    expect(t3sql).toMatch(/COALESCE\(mp\.scan_count, 1\)/);
+  });
+
+  test('Tier 3: NULL confidence is gated out by default (NULL → 0.39 < 0.40)', async () => {
+    query.mockResolvedValueOnce({ rows: [] }); // T1 miss
+    query.mockResolvedValueOnce({
+      rows: [
+        { price: '5.99', unit_price: '5.99', confidence: null, updated_at: new Date(),
+          product_name: 'Generic', sim: '0.82', scan_count: '5' },
+      ],
+    });
+    const m = await svc.matchItemAtStore({ item: { name: 'milk' }, storeId: 'S1' });
+    expect(m).toEqual({ matched: false });
   });
 
   test('Tier 3: PACS gate excludes low-confidence rows', async () => {
@@ -168,6 +198,28 @@ describe('matchItemAtStore', () => {
     const m = await svc.matchItemAtStore({ item: { name: '' }, storeId: 'S1' });
     expect(m).toEqual({ matched: false });
     expect(query).not.toHaveBeenCalled();
+  });
+});
+
+// ── reference-price discovery (median) ────────────────────
+describe('reference unit price (used for ±30% band)', () => {
+  test('SQL uses PERCENTILE_CONT(0.5) median, not MIN', async () => {
+    // Internal helper not directly exported; observe SQL through the
+    // priceBasketAtStore-level call path. Here we exercise it via the
+    // full getRecommendations pipeline up to the ref-prices query.
+    query.mockResolvedValueOnce({ rows: [{ id: 'L1', list_version: 1, items: [{ id: 'i1', name: 'milk', quantity: 1 }] }] });
+    query.mockResolvedValueOnce({ rows: [{ id: 'S1', name: 'Foo', address: 'a', latitude: '40', longitude: '-74', distance_km: '1' }] });
+    query.mockResolvedValueOnce({ rows: [{ k: 'milk', ref: '4.99' }] }); // ref prices
+    query.mockResolvedValueOnce({ rows: [] }); // T1 miss
+    query.mockResolvedValueOnce({ rows: [] }); // T3 empty
+    driveTimeService.getDriveTimes.mockResolvedValueOnce([{ store_id: 'S1', duration_seconds: 600, distance_meters: 5000, cache_hit: false }]);
+    query.mockResolvedValueOnce({ rows: [{ default_store_id: null }] });
+
+    await svc.getRecommendations({ userId: 'u', listId: 'L1', userLat: 40, userLng: -74 });
+
+    const refSql = query.mock.calls[2][0];
+    expect(refSql).toMatch(/PERCENTILE_CONT\(0\.5\)/);
+    expect(refSql).not.toMatch(/MIN\(sp\.unit_price\)/);
   });
 });
 

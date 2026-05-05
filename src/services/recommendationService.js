@@ -36,8 +36,17 @@
 // PACS NORMALIZATION:
 //   store_prices.confidence is the per-row trust signal. Some
 //   write paths use 0–1 (GPT vision), others use 0–100 (legacy
-//   layout convention). We normalize: > 1 → divide by 100, NULL
-//   → 0.5 (medium). The 0.40 gate applies to the normalized value.
+//   layout convention). We normalize: > 1 → divide by 100. NULL
+//   → 0.39 (strictly below the 0.40 gate, gates legacy pre-tracking
+//   rows out by default). Per-row decision: a row with no
+//   confidence signal shouldn't participate at neutral weight.
+//
+// SCAN_COUNT JOIN:
+//   Tier-3 LEFT JOINs market_prices on barcode to pick up scan_count
+//   for the substitution score. Missing row → fallback 1. The score
+//   term log10(scan_count + 10) is designed to barely move at low
+//   counts (≈1.04 at 1) and meaningfully shift at high counts (≈1.78
+//   at 50) — this is what makes corroborated prices outrank flukes.
 // ============================================================
 
 const { query } = require('../models/db');
@@ -89,10 +98,15 @@ function clearCache() {
 }
 
 // ── Helpers ────────────────────────────────────────────────
+// NULL → 0.39: strictly below the 0.40 gate, so legacy pre-tracking
+// rows are excluded from substitution by default. Philosophically
+// consistent with the design — a row with no confidence signal
+// shouldn't participate at neutral weight. (The gate uses strict <,
+// so 0.40 itself would pass; we need < 0.40 to fail it.)
 function _normalizePacs(raw) {
-  if (raw === null || raw === undefined) return 0.5;
+  if (raw === null || raw === undefined) return 0.39;
   const v = parseFloat(raw);
-  if (Number.isNaN(v)) return 0.5;
+  if (Number.isNaN(v)) return 0.39;
   return v > 1 ? v / 100 : v;
 }
 
@@ -207,14 +221,21 @@ async function matchItemAtStore({ item, storeId, referenceUnitPrice = null }) {
   }
 
   // Tier 3: trigram + PACS gate (+ price band when reference available)
+  // LEFT JOIN market_prices on barcode to pick up scan_count for the
+  // substitution score. A misread that slipped past quarantine (count=1)
+  // should not rank identically to an established corroborated price
+  // (count=50). Missing market_prices row → fallback scan_count=1.
   if (!itemName) return { matched: false };
   const t3 = await query(
     `SELECT sp.price, sp.unit_price, sp.confidence, sp.updated_at,
             p.name AS product_name, p.barcode,
-            similarity(LOWER(p.name), $2) AS sim
+            similarity(LOWER(p.name), $2) AS sim,
+            COALESCE(mp.scan_count, 1) AS scan_count
        FROM products p
        JOIN store_prices sp
          ON sp.barcode = p.barcode AND sp.store_id = $1
+       LEFT JOIN market_prices mp
+         ON mp.barcode = p.barcode
       WHERE similarity(LOWER(p.name), $2) > $3
         AND sp.price > 0
         AND sp.updated_at > NOW() - INTERVAL '${STALENESS_DAYS} days'
@@ -240,7 +261,7 @@ async function matchItemAtStore({ item, storeId, referenceUnitPrice = null }) {
     const score = _substitutionScore({
       similarity: parseFloat(r.sim),
       pacs,
-      scanCount: 1, // store_prices doesn't carry scan_count; keep as no-op for v1
+      scanCount: parseInt(r.scan_count) || 1,
       updatedAt: r.updated_at,
     });
     if (!best || score > best._score) {
@@ -263,8 +284,14 @@ async function matchItemAtStore({ item, storeId, referenceUnitPrice = null }) {
 
 // ── Reference price discovery ──────────────────────────────
 // To gate Tier-3 substitutions with the ±30% band, we need a target
-// unit_price. The strongest signal is "what does an exact-name
-// match cost?" — looked up at any store with stale-fresh data.
+// unit_price. The strongest signal is "what does an exact-name match
+// cost?" — looked up at any store with stale-fresh data.
+//
+// Tiebreaker (Avi 2026-05-04): when multiple exact-name matches
+// exist across stores at materially different prices, use the MEDIAN
+// (PERCENTILE_CONT 0.5) — a single high or low outlier shouldn't
+// compress the band against valid substitutes.
+//
 // Returns { itemKey: refUnitPrice, ... } for items that have one.
 async function _buildReferenceUnitPrices(items) {
   const out = {};
@@ -272,7 +299,8 @@ async function _buildReferenceUnitPrices(items) {
   const names = items.map(i => (i.name || '').toLowerCase()).filter(Boolean);
   if (!names.length) return out;
   const result = await query(
-    `SELECT LOWER(p.name) AS k, MIN(sp.unit_price) AS ref
+    `SELECT LOWER(p.name) AS k,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY sp.unit_price) AS ref
        FROM products p
        JOIN store_prices sp ON sp.barcode = p.barcode
       WHERE LOWER(p.name) = ANY($1)
