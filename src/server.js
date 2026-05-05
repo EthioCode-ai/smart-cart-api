@@ -29,6 +29,7 @@ const storeLayoutRoutes = require('./routes/storeLayouts');
 const productsRoutes = require('./routes/products');
 const adminRoutes = require('./routes/admin');
 const predictionsRoutes = require('./routes/predictions');
+const recommendationsRoutes = require('./routes/recommendations');
 const { startCleanupCron: startDriveTimeCleanup } = require('./services/driveTimeService');
 
 const app = express();
@@ -79,6 +80,7 @@ app.use('/api/store-layouts', storeLayoutRoutes);
 app.use('/api/notifications', dashboardRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/predictions', predictionsRoutes);
+app.use('/api/recommendations', recommendationsRoutes);
 
 // ── Health Check ────────────────────────────────────────────
 
