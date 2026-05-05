@@ -87,6 +87,7 @@ router.get('/', async (req, res) => {
         totalCost: Math.round(totalCost * 100) / 100,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
+        listVersion: row.list_version ?? 0,
         items,
       };
     });
@@ -128,6 +129,7 @@ router.post('/', async (req, res) => {
         totalCost: 0,
         createdAt: list.created_at,
         updatedAt: list.updated_at,
+        listVersion: list.list_version ?? 0,
         items: [],
       },
     }, 201);
@@ -200,6 +202,7 @@ router.get('/:id', async (req, res) => {
         totalCost,
         createdAt: list.created_at,
         updatedAt: list.updated_at,
+        listVersion: list.list_version ?? 0,
         items,
       },
     });
@@ -333,9 +336,9 @@ router.post('/:id/items', async (req, res) => {
         [req.params.id, name.trim(), finalPrice, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id, weightValue, weightUnit, pricePerUnit, req.body.brand || null]
       );
 
-    // Update list timestamp
+    // Update list timestamp + bump list_version (Track 2: predictions/banner cache key)
     await query(
-      'UPDATE shopping_lists SET updated_at = NOW() WHERE id = $1',
+      'UPDATE shopping_lists SET updated_at = NOW(), list_version = list_version + 1 WHERE id = $1',
       [req.params.id]
     );
 
@@ -421,9 +424,9 @@ router.put('/:id/items/:itemId', async (req, res) => {
       return errorResponse(res, 404, 'Item not found');
     }
 
-    // Update list timestamp
+    // Update list timestamp + bump list_version (Track 2: predictions/banner cache key)
     await query(
-      'UPDATE shopping_lists SET updated_at = NOW() WHERE id = $1',
+      'UPDATE shopping_lists SET updated_at = NOW(), list_version = list_version + 1 WHERE id = $1',
       [req.params.id]
     );
 
@@ -479,9 +482,9 @@ router.delete('/:id/items/:itemId', async (req, res) => {
       return errorResponse(res, 404, 'Item not found');
     }
 
-    // Update list timestamp
+    // Update list timestamp + bump list_version (Track 2: predictions/banner cache key)
     await query(
-      'UPDATE shopping_lists SET updated_at = NOW() WHERE id = $1',
+      'UPDATE shopping_lists SET updated_at = NOW(), list_version = list_version + 1 WHERE id = $1',
       [req.params.id]
     );
 
@@ -508,11 +511,20 @@ router.patch('/:id/items/:itemId/toggle', async (req, res) => {
       return errorResponse(res, 404, 'List not found');
     }
 
+    // Toggle item + bump shopping_lists.list_version atomically (single statement, single tx).
     const result = await query(
-      `UPDATE list_items
-       SET checked = NOT checked, updated_at = NOW()
-       WHERE id = $1 AND list_id = $2
-       RETURNING *`,
+      `WITH toggled AS (
+         UPDATE list_items
+            SET checked = NOT checked, updated_at = NOW()
+          WHERE id = $1 AND list_id = $2
+          RETURNING *
+       ), bumped AS (
+         UPDATE shopping_lists
+            SET updated_at = NOW(), list_version = list_version + 1
+          WHERE id = $2 AND EXISTS (SELECT 1 FROM toggled)
+          RETURNING id
+       )
+       SELECT * FROM toggled`,
       [req.params.itemId, req.params.id]
     );
 
