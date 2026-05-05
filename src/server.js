@@ -29,6 +29,7 @@ const storeLayoutRoutes = require('./routes/storeLayouts');
 const productsRoutes = require('./routes/products');
 const adminRoutes = require('./routes/admin');
 const predictionsRoutes = require('./routes/predictions');
+const { startCleanupCron: startDriveTimeCleanup } = require('./services/driveTimeService');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -135,6 +136,9 @@ app.listen(PORT, () => {
   ║   Environment: ${process.env.NODE_ENV || 'development'}      ║
   ╚══════════════════════════════════════╝
   `);
+  // drive_time_cache: deletes rows >30 min old, every 5 min. unref'd so
+  // it never blocks shutdown. Lost-on-restart is fine — cache isn't authoritative.
+  startDriveTimeCleanup();
 });
 
 module.exports = app;
