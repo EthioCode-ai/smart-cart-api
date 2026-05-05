@@ -511,20 +511,15 @@ router.patch('/:id/items/:itemId/toggle', async (req, res) => {
       return errorResponse(res, 404, 'List not found');
     }
 
-    // Toggle item + bump shopping_lists.list_version atomically (single statement, single tx).
+    // Toggle item only. Per the Track 2 migration (2026_05_phase2_recommend_a_store.sql):
+    //   "NOT bumped on: checked_off toggle (preserves cache hits during in-trip strike-through)"
+    // checked changes don't alter list membership, so the predictions banner and
+    // Recommend-a-Store caches remain valid while the user is shopping.
     const result = await query(
-      `WITH toggled AS (
-         UPDATE list_items
-            SET checked = NOT checked, updated_at = NOW()
-          WHERE id = $1 AND list_id = $2
-          RETURNING *
-       ), bumped AS (
-         UPDATE shopping_lists
-            SET updated_at = NOW(), list_version = list_version + 1
-          WHERE id = $2 AND EXISTS (SELECT 1 FROM toggled)
-          RETURNING id
-       )
-       SELECT * FROM toggled`,
+      `UPDATE list_items
+       SET checked = NOT checked, updated_at = NOW()
+       WHERE id = $1 AND list_id = $2
+       RETURNING *`,
       [req.params.itemId, req.params.id]
     );
 
