@@ -7,6 +7,7 @@ const express = require('express');
 const { query, successResponse, errorResponse } = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const { generateShareCode } = require('../utils/helpers');
+const allergenOverrideService = require('../services/allergenOverrideService');
 
 const router = express.Router();
 
@@ -528,6 +529,22 @@ router.patch('/:id/items/:itemId/toggle', async (req, res) => {
     }
 
     const item = result.rows[0];
+
+    // Allergen-override write-path (commit 11). Only checked=true is a
+    // purchase signal (un-checking is not). Best-effort and fully
+    // isolated: an override-bookkeeping failure must NEVER fail the
+    // toggle — the toggle is the user-facing action, this is secondary.
+    // DORMANT in v1 (products.allergens sparse → returns fast-empty).
+    if (item.checked === true) {
+      try {
+        await allergenOverrideService.recordPurchaseSignal({
+          userId: req.user.id,
+          item: { id: item.id, name: item.name, barcode: item.barcode },
+        });
+      } catch (ovErr) {
+        console.error('[allergen-override] purchase-signal record failed (non-fatal):', ovErr.message);
+      }
+    }
 
     successResponse(res, {
       item: {
