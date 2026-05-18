@@ -78,6 +78,55 @@ describe('_substitutionScore', () => {
   });
 });
 
+// ── Allergen-override scaffolding (commit 10, dormant in v1) ──
+describe('itemMatchKey', () => {
+  test('barcode wins when present', () => {
+    expect(svc.itemMatchKey({ barcode: '012345', name: 'Milk' })).toBe('012345');
+  });
+  test('falls back to lower(trim(name)) without barcode', () => {
+    expect(svc.itemMatchKey({ name: '  Whole Milk  ' })).toBe('whole milk');
+  });
+  test('null/empty item → empty string', () => {
+    expect(svc.itemMatchKey(null)).toBe('');
+    expect(svc.itemMatchKey({})).toBe('');
+  });
+});
+
+describe('resolveAllergenState', () => {
+  test('empty household allergens → null (dormant-in-v1 path)', () => {
+    expect(svc.resolveAllergenState({
+      productAllergens: ['dairy'], householdAllergens: [], override: null,
+    })).toBeNull();
+  });
+  test('empty product allergens → null', () => {
+    expect(svc.resolveAllergenState({
+      productAllergens: [], householdAllergens: ['dairy'], override: null,
+    })).toBeNull();
+  });
+  test('no intersection → null', () => {
+    expect(svc.resolveAllergenState({
+      productAllergens: ['gluten'], householdAllergens: ['dairy'], override: null,
+    })).toBeNull();
+  });
+  test('intersection, no override → strikethrough', () => {
+    expect(svc.resolveAllergenState({
+      productAllergens: ['dairy'], householdAllergens: ['dairy'], override: null,
+    })).toBe('strikethrough');
+  });
+  test('intersection, override still strikethrough → strikethrough', () => {
+    expect(svc.resolveAllergenState({
+      productAllergens: ['Dairy'], householdAllergens: ['dairy'],
+      override: { current_state: 'strikethrough' },
+    })).toBe('strikethrough');
+  });
+  test('intersection, override normalized → normalized (case/space-insensitive)', () => {
+    expect(svc.resolveAllergenState({
+      productAllergens: ['  DAIRY '], householdAllergens: ['dairy'],
+      override: { current_state: 'normalized' },
+    })).toBe('normalized');
+  });
+});
+
 // ── Constants ────────────────────────────────────────────
 describe('exposed constants', () => {
   test('match the spec values', () => {

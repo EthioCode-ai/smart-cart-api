@@ -121,6 +121,63 @@ function _substitutionScore({ similarity, pacs, scanCount, updatedAt }) {
   return similarity * pacs * Math.log10(sc + 10) * _recencyDecay(updatedAt);
 }
 
+// ── Allergen-override scaffolding (Track 2 commit 10) ──────
+// DORMANT in v1. The route-level gate (commit 7) returns
+// allergen_safety_unavailable for any household with allergens
+// recorded, so the engine never runs for those users in v1; and
+// for users WITHOUT recorded allergens the household set is empty.
+// Either way getRecommendations is called with householdAllergens=[]
+// in v1, so resolveAllergenState is never reached and the response
+// shape is byte-identical to pre-commit-10.
+//
+// v1.1 activation (when products.allergens is populated and the
+// per-item path replaces the household gate): the caller passes the
+// real household allergen set, matchItemAtStore starts returning
+// product_allergens, and these three functions light up unchanged.
+
+// Must match commit 11's write-path key EXACTLY: barcode when present,
+// else lower(trim(name)). A mismatch here vs. the toggle handler =
+// overrides that never resolve.
+function itemMatchKey(item) {
+  if (item && item.barcode) return String(item.barcode);
+  return ((item && item.name) || '').trim().toLowerCase();
+}
+
+// Pure decision function. Given the product's allergens, the
+// household's recorded allergens, and any existing override row for
+// this (item, allergen), return the display state:
+//   null            — no allergen concern (no intersection)
+//   'strikethrough' — household-allergen match, not yet normalized
+//                      (excluded from basket total by caller)
+//   'normalized'    — user has bought it through anyway (override
+//                      flipped); included in total, inline label
+function resolveAllergenState({ productAllergens, householdAllergens, override }) {
+  if (!Array.isArray(householdAllergens) || householdAllergens.length === 0) return null;
+  if (!Array.isArray(productAllergens) || productAllergens.length === 0) return null;
+  const hh = new Set(householdAllergens.map((a) => String(a).trim().toLowerCase()));
+  const hit = productAllergens.some((a) => hh.has(String(a).trim().toLowerCase()));
+  if (!hit) return null;
+  if (override && override.current_state === 'normalized') return 'normalized';
+  return 'strikethrough';
+}
+
+// Loads a user's override rows into a Map keyed `${item_match_key}|${allergen}`.
+// Only called when householdAllergens is non-empty (v1.1) — never in v1,
+// so no extra query fires in v1.
+async function loadAllergenOverrides(userId) {
+  const result = await query(
+    `SELECT item_match_key, allergen, current_state, purchase_count
+       FROM allergen_overrides
+      WHERE user_id = $1`,
+    [userId]
+  );
+  const map = new Map();
+  for (const r of result.rows) {
+    map.set(`${r.item_match_key}|${r.allergen}`, r);
+  }
+  return map;
+}
+
 // ── Query A: candidate stores by Haversine ────────────────
 // Returns nearby stores, ordered by straight-line distance. Drive
 // time comes later via driveTimeService — this is the cheap pre-filter.
@@ -320,7 +377,12 @@ async function _buildReferenceUnitPrices(items) {
 // For one store, runs the 3-tier match for every list item, sums
 // the prices, and reports per-item match metadata. Items the store
 // can't fulfill are counted in missing_count.
-async function priceBasketAtStore({ items, store, refPrices = {} }) {
+async function priceBasketAtStore({ items, store, refPrices = {}, householdAllergens = [], overrideMap = null }) {
+  // DORMANT-IN-v1 guard: householdAllergens is always [] in v1 (see the
+  // scaffolding note above), so allergenActive is false and every code
+  // path below is byte-identical to pre-commit-10. v1.1 passes a real
+  // set + overrideMap and the allergen branch lights up.
+  const allergenActive = Array.isArray(householdAllergens) && householdAllergens.length > 0;
   const lineItems = [];
   let totalCost = 0;
   let missingCount = 0;
@@ -334,7 +396,28 @@ async function priceBasketAtStore({ items, store, refPrices = {} }) {
     if (m.matched) {
       const qty = parseFloat(item.quantity) || 1;
       const lineCost = m.price * qty;
-      totalCost += lineCost;
+
+      // v1: allergenActive=false → state stays undefined, no field added,
+      // full lineCost counted. v1.1: matched product's allergens (from
+      // m.product_allergens) intersected with the household set; a
+      // 'strikethrough' item is reported but NOT summed into total_cost
+      // (can't safely recommend a store on an unsafe basket).
+      let allergenState;
+      if (allergenActive) {
+        const key = itemMatchKey(item);
+        const productAllergens = m.product_allergens || [];
+        for (const a of productAllergens) {
+          const st = resolveAllergenState({
+            productAllergens,
+            householdAllergens,
+            override: overrideMap ? overrideMap.get(`${key}|${String(a).trim().toLowerCase()}`) : null,
+          });
+          if (st) { allergenState = st; if (st === 'strikethrough') break; }
+        }
+      }
+
+      if (allergenState !== 'strikethrough') totalCost += lineCost;
+
       lineItems.push({
         list_item_id: item.id,
         name: item.name,
@@ -346,6 +429,7 @@ async function priceBasketAtStore({ items, store, refPrices = {} }) {
         unit_price: m.price,
         line_cost: Math.round(lineCost * 100) / 100,
         substitute: m.substitute || null,
+        ...(allergenState ? { allergen_state: allergenState } : {}),
       });
     } else {
       missingCount += 1;
@@ -444,6 +528,11 @@ async function getRecommendations({
   radiusKm = DEFAULT_RADIUS_KM,
   candidateLimit = DEFAULT_CANDIDATE_LIMIT,
   bypassCache = false,
+  // DORMANT-IN-v1: the route never passes this (commit 7's gate handles
+  // allergen households; non-allergen households have an empty set).
+  // v1.1 passes the real household allergen set to activate per-item
+  // tagging in priceBasketAtStore.
+  householdAllergens = [],
 } = {}) {
   if (!userId) throw new Error('userId required');
   if (!listId) throw new Error('listId required');
@@ -516,9 +605,18 @@ async function getRecommendations({
   // 4. Reference unit prices (for Tier-3 ±30% band)
   const refPrices = await _buildReferenceUnitPrices(items);
 
+  // 4b. Allergen overrides — DORMANT in v1: householdAllergens is []
+  // so this branch is skipped entirely (no extra query). v1.1 passes a
+  // real set; the override map then scopes which struck items the user
+  // has normalized.
+  const allergenActive = Array.isArray(householdAllergens) && householdAllergens.length > 0;
+  const overrideMap = allergenActive ? await loadAllergenOverrides(userId) : null;
+
   // 5. Price basket per candidate store (parallel)
   const candidates = await Promise.all(
-    stores.map(s => priceBasketAtStore({ items, store: s, refPrices }))
+    stores.map(s => priceBasketAtStore({
+      items, store: s, refPrices, householdAllergens, overrideMap,
+    }))
   );
 
   // 6. Drive time enrichment (single batched DM call)
@@ -556,6 +654,11 @@ module.exports = {
   priceBasketAtStore,
   evaluateBannerTrigger,
   clearCache,
+  // Allergen-override scaffolding (commit 10) — dormant in v1.
+  // itemMatchKey is shared with commit 11's write-path; keep in sync.
+  itemMatchKey,
+  resolveAllergenState,
+  loadAllergenOverrides,
   // exported for tests / future extension
   _normalizePacs,
   _recencyDecay,
