@@ -7,6 +7,7 @@ const express = require('express');
 const { query, successResponse, errorResponse } = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const predictionService = require('../services/predictionService');
+const recipeImageCache = require('../services/recipeImageCache');
 
 const router = express.Router();
 
@@ -22,12 +23,58 @@ try {
   console.warn('OpenAI not configured. AI features will return mock data.');
 }
 
+// ── Cloudinary (for persisting DALL-E images past their ~1hr expiry) ───
+const cloudinary = require('cloudinary').v2;
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// Upload a remote image URL (e.g. a DALL-E URL) to Cloudinary and
+// return the permanent secure_url. Cloudinary fetches the source
+// server-side, so we never download to our server. Returns null on
+// any failure — caller falls back to the original URL.
+const uploadRecipeImageToCloudinary = async (sourceUrl) => {
+  if (!process.env.CLOUDINARY_CLOUD_NAME || !sourceUrl) return null;
+  try {
+    const result = await cloudinary.uploader.upload(sourceUrl, {
+      folder: 'smart-cart/recipes',
+      public_id: `recipe_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      transformation: [
+        { width: 1024, height: 1024, crop: 'limit', quality: 'auto:good', format: 'webp' },
+      ],
+    });
+    return result.secure_url || null;
+  } catch (err) {
+    console.error('Cloudinary recipe upload error:', err.message);
+    return null;
+  }
+};
+
 const DEFAULT_RECIPE_IMAGE = 'https://images.unsplash.com/photo-1495521821757-a1efb6729352?w=600&h=400&fit=crop';
 
 // ── Helper: Generate recipe image with DALL-E ───────────────
 
 const generateRecipeImage = async (recipeTitle, recipeDescription, keyIngredients) => {
-  if (!openai || !recipeTitle) return DEFAULT_RECIPE_IMAGE;
+  if (!recipeTitle) return DEFAULT_RECIPE_IMAGE;
+
+  // 1. Cache lookup. On hit we skip DALL-E AND Cloudinary entirely —
+  //    the cached URL already points to a permanent Cloudinary file.
+  try {
+    const cachedUrl = await recipeImageCache.lookup(recipeTitle);
+    if (cachedUrl) {
+      // Fire-and-forget hit telemetry (errors swallowed inside).
+      recipeImageCache.recordHit(recipeTitle);
+      return cachedUrl;
+    }
+  } catch (err) {
+    console.warn('[generateRecipeImage] cache lookup failed, falling through:', err.message);
+    // Treat as a miss; we'd rather over-generate than block the user.
+  }
+
+  // 2. Cache miss → generate via DALL-E.
+  if (!openai) return DEFAULT_RECIPE_IMAGE;
   try {
     // Build ingredient context for accuracy
     const ingredientText = keyIngredients && keyIngredients.length > 0
@@ -50,7 +97,21 @@ const generateRecipeImage = async (recipeTitle, recipeDescription, keyIngredient
       size: '1024x1024',
       quality: 'standard',
     });
-    return response.data[0]?.url || DEFAULT_RECIPE_IMAGE;
+    const dalleUrl = response.data && response.data[0] && response.data[0].url;
+    if (!dalleUrl) return DEFAULT_RECIPE_IMAGE;
+
+    // 3. Persist to Cloudinary so the URL doesn't expire. If Cloudinary
+    //    isn't configured / fails, we still cache the OpenAI URL — better
+    //    than nothing for the ~1hr it stays alive, and the recordHit logic
+    //    will surface it the next time someone asks.
+    const permanentUrl = await uploadRecipeImageToCloudinary(dalleUrl);
+    const finalUrl = permanentUrl || dalleUrl;
+    const source = permanentUrl ? 'dall-e-3+cloudinary' : 'dall-e-3';
+
+    // 4. Cache the result (best-effort, errors swallowed inside).
+    recipeImageCache.store(recipeTitle, finalUrl, source);
+
+    return finalUrl;
   } catch (error) {
     console.error('DALL-E image generation error:', error.message);
     return DEFAULT_RECIPE_IMAGE;
@@ -662,11 +723,24 @@ Important rules:
     // full_course mode: one hero image for the meal theme (not per course)
     // chat/shopping:    no images needed
 
-    // Assign placeholder images — real images load async via /api/ai/generate-image
+    // Recipe mode: cache lookup happens here so repeat viewers of a known
+    // dish get the real Cloudinary URL embedded in the response instantly
+    // (no second round-trip to /generate-image needed). Cache misses keep
+    // the placeholder; the client's existing async call to /generate-image
+    // triggers the DALL-E + Cloudinary + cache-write path for first-time
+    // dishes. Lookups are best-effort - failure falls back to placeholder.
     if (mode === 'recipe' && result.recipes && result.recipes.length > 0) {
-      result.recipes = result.recipes.map(recipe => ({
-        ...recipe,
-        imageUrl: DEFAULT_RECIPE_IMAGE,
+      result.recipes = await Promise.all(result.recipes.map(async (recipe) => {
+        let cachedUrl = null;
+        try {
+          cachedUrl = await recipeImageCache.lookup(recipe.title);
+        } catch (err) {
+          console.warn('[generate-list] cache lookup failed for recipe:', err.message);
+        }
+        if (cachedUrl) {
+          recipeImageCache.recordHit(recipe.title);
+        }
+        return { ...recipe, imageUrl: cachedUrl || DEFAULT_RECIPE_IMAGE };
       }));
     }
     let heroImageUrl = DEFAULT_RECIPE_IMAGE;
