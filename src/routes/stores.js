@@ -69,14 +69,8 @@ const haversineKm = (lat1, lon1, lat2, lon2) => {
 };
 
 // ── Helper: Fetch from Google Places API ──────────────────────
-// Avi-found 2026-05-19: `type=supermarket` is too narrow — Google Places
-// categorizes Walmart Supercenters as `department_store`/`discount_store`,
-// NOT `supermarket`, so they disappeared from Nearby results while smaller
-// Neighborhood Markets (`type=supermarket`) showed up. The intended fix was
-// keyword-based (function signature + comment both said so) but the URL was
-// still hard-coding the type filter. Switching to `keyword=` so the full
-// grocery surface - supercenters, neighborhood markets, discount grocers,
-// ethnic markets - is captured.
+// Always fetches fresh results. No type= filter so keyword catches
+// supermarkets, grocery stores, discount grocers, ethnic markets, etc.
 const fetchGooglePlaces = async (originLat, originLng, radiusMeters = 25000, keyword = 'grocery store supermarket') => {
   if (!GOOGLE_MAPS_KEY) {
     console.warn('G_MAPS env variable not set — cannot fetch Google Places');
@@ -86,7 +80,7 @@ const fetchGooglePlaces = async (originLat, originLng, radiusMeters = 25000, key
   const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json`
     + `?location=${originLat},${originLng}`
     + `&radius=${radiusMeters}`
-    + `&keyword=${encodeURIComponent(keyword)}`
+    + `&type=supermarket`
     + `&key=${GOOGLE_MAPS_KEY}`;
 
   try {
