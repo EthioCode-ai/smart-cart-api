@@ -69,46 +69,85 @@ const haversineKm = (lat1, lon1, lat2, lon2) => {
 };
 
 // ── Helper: Fetch from Google Places API ──────────────────────
-// Always fetches fresh results. No type= filter so keyword catches
-// supermarkets, grocery stores, discount grocers, ethnic markets, etc.
-const fetchGooglePlaces = async (originLat, originLng, radiusMeters = 25000, keyword = 'grocery store supermarket') => {
-  if (!GOOGLE_MAPS_KEY) {
-    console.warn('G_MAPS env variable not set — cannot fetch Google Places');
-    return [];
-  }
+// Issues multiple parallel Nearby Search queries (one per relevant type),
+// dedupes by place_id, and returns every grocery destination sorted by
+// distance. Strict `type=` filters are reliable but each one alone is too
+// narrow:
+//   - `supermarket`            -> Neighborhood Markets, Kroger, Aldi, ethnic markets
+//   - `grocery_or_supermarket` -> Google's broader legacy combined category
+//   - `department_store`       -> Walmart Supercenters, Target, Costco, Sam's,
+//                                 BJ's, Meijer, Fred Meyer (filtered by name
+//                                 against KNOWN_GROCERY_CHAINS so we don't
+//                                 pollute the list with Macy's/Kohl's etc.)
+// A keyword-only query (the failed d97b066 approach) ranked Walmart Supercenters
+// out because the keyword text doesn't appear in their place names. Multi-type
+// is the right primitive.
+const KNOWN_GROCERY_CHAINS = [
+  'walmart', 'target', 'costco', 'sam\'s', 'sams club', 'bj\'s', 'bjs',
+  'meijer', 'fred meyer', 'super target', 'walmart neighborhood',
+];
 
+const fetchGooglePlacesByType = async (originLat, originLng, radiusMeters, type) => {
   const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json`
     + `?location=${originLat},${originLng}`
     + `&radius=${radiusMeters}`
-    + `&type=supermarket`
+    + `&type=${type}`
     + `&key=${GOOGLE_MAPS_KEY}`;
-
   try {
     const response = await fetch(url);
     const data = await response.json();
-
     if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
-      console.error('Google Places API error:', data.status, data.error_message);
+      console.error(`Google Places (${type}) error:`, data.status, data.error_message);
       return [];
     }
-
-    const results = data.results || [];
-
-    // Calculate server-side distance and attach to each store
-    const stores = results.map(place => {
-      const store = formatGooglePlace(place);
-      const distKm = haversineKm(originLat, originLng, store.latitude, store.longitude);
-      store.distance = Math.round(distKm * 100) / 100;
-      return store;
-    });
-
-    // Return sorted nearest-first
-    stores.sort((a, b) => a.distance - b.distance);
-    return stores;
+    return data.results || [];
   } catch (err) {
-    console.error('Google Places fetch error:', err.message);
+    console.error(`Google Places (${type}) fetch error:`, err.message);
     return [];
   }
+};
+
+const isGroceryDepartmentStore = (place) => {
+  const name = (place.name || '').toLowerCase();
+  return KNOWN_GROCERY_CHAINS.some(chain => name.includes(chain));
+};
+
+const fetchGooglePlaces = async (originLat, originLng, radiusMeters = 25000) => {
+  if (!GOOGLE_MAPS_KEY) {
+    console.warn('G_MAPS env variable not set - cannot fetch Google Places');
+    return [];
+  }
+
+  // Three parallel queries. Each is one billable Places call; the multi-type
+  // pattern is the cost we accept for full grocery coverage. Cached results
+  // in our stores table amortize this across users in the same zone.
+  const [supermarkets, grocerySupermarkets, departmentStores] = await Promise.all([
+    fetchGooglePlacesByType(originLat, originLng, radiusMeters, 'supermarket'),
+    fetchGooglePlacesByType(originLat, originLng, radiusMeters, 'grocery_or_supermarket'),
+    fetchGooglePlacesByType(originLat, originLng, radiusMeters, 'department_store'),
+  ]);
+
+  // Dedupe by place_id. department_store results are restricted to known
+  // grocery chains so non-grocery department stores (Macy's, Kohl's, JCPenney,
+  // furniture stores) don't pollute the list.
+  const filteredDeptStores = departmentStores.filter(isGroceryDepartmentStore);
+  const byPlaceId = new Map();
+  for (const place of [...supermarkets, ...grocerySupermarkets, ...filteredDeptStores]) {
+    if (place.place_id && !byPlaceId.has(place.place_id)) {
+      byPlaceId.set(place.place_id, place);
+    }
+  }
+
+  // Format + attach distance + sort nearest-first. NO additional chain or
+  // type filtering at this point - Avi's rule: ALL stores by distance.
+  const stores = Array.from(byPlaceId.values()).map(place => {
+    const store = formatGooglePlace(place);
+    const distKm = haversineKm(originLat, originLng, store.latitude, store.longitude);
+    store.distance = Math.round(distKm * 100) / 100;
+    return store;
+  });
+  stores.sort((a, b) => a.distance - b.distance);
+  return stores;
 };
 
 // ── Helper: Cache Google Places results in DB ───────────────
