@@ -66,6 +66,7 @@ router.get('/', async (req, res) => {
         category: item.department,
         checked: item.checked || false,
         notes: item.notes || '',
+        imageUrl: item.image_url || null,
         addedBy: item.added_by,
         addedByName: item.added_by_name,
         createdAt: item.created_at,
@@ -180,6 +181,7 @@ router.get('/:id', async (req, res) => {
       checked: item.checked,
       notes: item.notes || '',
       barcode: item.barcode || null,
+      imageUrl: item.image_url || null,
       weightValue: item.weight_value ? parseFloat(item.weight_value) : null,
       weightUnit: item.weight_unit || null,
       pricePerUnit: item.price_per_unit ? parseFloat(item.price_per_unit) : null,
@@ -275,7 +277,7 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/:id/items', async (req, res) => {
   try {
-    const { name, price, unit, department, notes, barcode } = req.body;
+    const { name, price, unit, department, notes, barcode, imageUrl } = req.body;
     // Parse fractional quantities: "1/2" → 0.5, "1 1/2" → 1.5, "3" → 3
     let quantity = req.body.quantity;
     if (typeof quantity === 'string') {
@@ -331,10 +333,10 @@ router.post('/:id/items', async (req, res) => {
       }
 
       const result = await query(
-        `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, barcode, added_by, weight_value, weight_unit, price_per_unit, brand)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `INSERT INTO list_items (list_id, name, price, quantity, unit, department, notes, barcode, added_by, weight_value, weight_unit, price_per_unit, brand, image_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          RETURNING *`,
-        [req.params.id, name.trim(), finalPrice, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id, weightValue, weightUnit, pricePerUnit, req.body.brand || null]
+        [req.params.id, name.trim(), finalPrice, quantity || 1, unit || null, department, notes || null, barcode || null, req.user.id, weightValue, weightUnit, pricePerUnit, req.body.brand || null, imageUrl || null]
       );
 
     // Update list timestamp + bump list_version (Track 2: predictions/banner cache key)
@@ -358,6 +360,7 @@ router.post('/:id/items', async (req, res) => {
         checked: item.checked,
         notes: item.notes || '',
         barcode: item.barcode || null,
+        imageUrl: item.image_url || null,
         weightValue: item.weight_value ? parseFloat(item.weight_value) : null,
         weightUnit: item.weight_unit || null,
         pricePerUnit: item.price_per_unit ? parseFloat(item.price_per_unit) : null,
