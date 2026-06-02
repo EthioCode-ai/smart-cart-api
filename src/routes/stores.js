@@ -417,6 +417,95 @@ router.get('/:id/contributions', async (req, res) => {
   }
 });
 
+// ── GET /api/stores/:id/products ────────────────────────────
+// Avi-locked spec 2026-06-02:
+//   #1 scope     : all moat scans at this store (no scanned_by filter)
+//   #3 voice/text: excluded by construction - store_prices is only ever
+//                  written by products.js scan paths (Walk & Scan,
+//                  barcode, gpt_vision OCR). Manual list entries never
+//                  enter store_prices, so no source filter is needed.
+//   #4 price     : most-recent. The UNIQUE (store_id, barcode) constraint
+//                  on store_prices means one row per product per store,
+//                  with the latest scan's price (INSERT...ON CONFLICT
+//                  UPDATE overwrites). ORDER BY updated_at DESC gives
+//                  most-recently-scanned first.
+//
+// Query params:
+//   q      - optional case-insensitive name search (ILIKE)
+//   limit  - default 50, capped at 200
+//   offset - default 0 for pagination
+//
+// Response shape:
+//   { store: { id, name }, products: [...], total, limit, offset }
+//
+// COUNT(*) OVER() carries the unfiltered-by-pagination total in every row
+// so the client gets pagination metadata without a second roundtrip.
+router.get('/:id/products', optionalAuth, async (req, res) => {
+  try {
+    const { q, limit, offset } = req.query;
+    const lim = Math.min(parseInt(limit, 10) || 50, 200);
+    const off = Math.max(parseInt(offset, 10) || 0, 0);
+    const search = q && q.trim().length > 0 ? q.trim() : null;
+
+    const storeResult = await query(
+      'SELECT id, name FROM stores WHERE id = $1',
+      [req.params.id]
+    );
+    if (storeResult.rows.length === 0) {
+      return errorResponse(res, 404, 'Store not found');
+    }
+
+    const productsResult = await query(
+      `SELECT
+         p.barcode, p.name, p.brand, p.category, p.image_url,
+         sp.price, sp.regular_price, sp.unit_price,
+         sp.aisle_number, sp.source, sp.updated_at AS last_scanned_at,
+         COUNT(*) OVER() AS total_count
+       FROM store_prices sp
+       JOIN products p ON p.barcode = sp.barcode
+       WHERE sp.store_id = $1
+         AND ($2::text IS NULL OR p.name ILIKE '%' || $2 || '%')
+       ORDER BY sp.updated_at DESC
+       LIMIT $3 OFFSET $4`,
+      [req.params.id, search, lim, off]
+    );
+
+    const rows = productsResult.rows;
+    const total = rows.length > 0 ? parseInt(rows[0].total_count, 10) : 0;
+    const products = rows.map(row => ({
+      barcode: row.barcode,
+      name: row.name,
+      brand: row.brand,
+      category: row.category,
+      imageUrl: row.image_url,
+      price: row.price !== null ? parseFloat(row.price) : null,
+      regularPrice: row.regular_price !== null ? parseFloat(row.regular_price) : null,
+      unitPrice: row.unit_price !== null ? parseFloat(row.unit_price) : null,
+      aisleNumber: row.aisle_number,
+      source: row.source,
+      lastScannedAt: row.last_scanned_at,
+    }));
+
+    successResponse(res, {
+      store: { id: storeResult.rows[0].id, name: storeResult.rows[0].name },
+      products,
+      total,
+      limit: lim,
+      offset: off,
+    });
+  } catch (error) {
+    // 42P01 = relation does not exist (store_prices/products missing).
+    // In that case return empty list rather than 500 - matches the
+    // graceful-degrade pattern used elsewhere when moat tables aren't
+    // initialized yet (e.g. recommendations.js).
+    if (error.code === '42P01') {
+      return successResponse(res, { products: [], total: 0, limit: 50, offset: 0 });
+    }
+    console.error('Get store products error:', error);
+    errorResponse(res, 500, 'Failed to fetch store products');
+  }
+});
+
 // ── POST /api/stores/:id/contributions ──────────────────────
 router.post('/:id/contributions', authenticate, async (req, res) => {
   try {
