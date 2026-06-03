@@ -378,7 +378,7 @@ router.post('/:id/items', async (req, res) => {
 
 router.put('/:id/items/:itemId', async (req, res) => {
   try {
-    const { name, price, quantity, department, checked } = req.body;
+    const { name, price, quantity, department, checked, imageUrl } = req.body;
 
     // Verify list access
     const listCheck = await query(
@@ -418,10 +418,11 @@ router.put('/:id/items/:itemId', async (req, res) => {
           weight_unit = COALESCE($7, weight_unit),
           price_per_unit = COALESCE($8, price_per_unit),
           brand = COALESCE($9, brand),
+          image_url = COALESCE($10, image_url),
           updated_at = NOW()
-         WHERE id = $10 AND list_id = $11
+         WHERE id = $11 AND list_id = $12
          RETURNING *`,
-        [name, finalPrice, quantity, department, checked, weightValue, weightUnit, pricePerUnit, req.body.brand, req.params.itemId, req.params.id]
+        [name, finalPrice, quantity, department, checked, weightValue, weightUnit, pricePerUnit, req.body.brand, imageUrl, req.params.itemId, req.params.id]
       );
 
     if (result.rows.length === 0) {
@@ -448,6 +449,7 @@ router.put('/:id/items/:itemId', async (req, res) => {
         checked: item.checked,
         notes: item.notes || '',
         barcode: item.barcode || null,
+        imageUrl: item.image_url || null,
         weightValue: item.weight_value ? parseFloat(item.weight_value) : null,
         weightUnit: item.weight_unit || null,
         pricePerUnit: item.price_per_unit ? parseFloat(item.price_per_unit) : null,
