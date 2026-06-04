@@ -623,9 +623,15 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
     let queryText, params;
 
     // SCA: category filter clauses spliced in only when categoryFilter is set.
-    // Empty string keeps the existing behavior identical for callers that
-    // don't pass the new param.
-    const catClause = categoryFilter ? ` AND LOWER(p.category) = LOWER($CAT_IDX) ` : '';
+    // BACKFILL-TOLERANT: we include p.category = 'grocery' as a passthrough
+    // so products the worker hasn't categorized yet still appear. Without
+    // this, during the ~hour backfill window the filter excludes most of
+    // the catalog and the picker returns an empty modal (Avi-reported
+    // 2026-06-04). As backfill completes, 'grocery' rows shrink to ~0
+    // and the filter becomes increasingly tight on its own.
+    const catClause = categoryFilter
+      ? ` AND (LOWER(p.category) = LOWER($CAT_IDX) OR LOWER(p.category) = 'grocery') `
+      : '';
 
     if (storeId) {
       // Prefer prices from the specified store, fall back to any store
@@ -699,7 +705,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
         // category products are excluded.
         const wordParams = words.map(w => `%${w}%`);
         const catWordClause = categoryFilter
-          ? ` AND LOWER(p.category) = LOWER($${wordParams.length + 1}) `
+          ? ` AND (LOWER(p.category) = LOWER($${wordParams.length + 1}) OR LOWER(p.category) = 'grocery') `
           : '';
         if (categoryFilter) wordParams.push(categoryFilter);
         const wordResult = await query(
