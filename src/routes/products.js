@@ -9,6 +9,11 @@ const { writeMarketPrice } = require('../services/marketPriceWriter');
 const { validatePriceWrite } = require('../utils/priceValidator');
 const { awardPoints, POINT_VALUES } = require('../services/pointsService');
 const fraudDetector = require('../services/fraudDetector');
+const {
+  extractSearchIntel,
+  scoreProductForSearch,
+  HARD_EXCLUDE,
+} = require('../services/visionIntel');
 const router = express.Router();
 
 // ── Cloudinary Setup ─────────────────────────────────────────
@@ -638,7 +643,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
       const catParamIdx = 4;
       queryText = `
         SELECT DISTINCT ON (p.id)
-          p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
+          p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.product_intel,
           COALESCE(sp_store.price, sp_any.price, p.price) AS price,
           COALESCE(sp_store.regular_price, sp_any.regular_price) AS regular_price,
           COALESCE(sp_store.unit_price, sp_any.unit_price) AS unit_price,
@@ -668,7 +673,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
       const catParamIdx = 3;
       queryText = `
         SELECT DISTINCT ON (p.id)
-          p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
+          p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.product_intel,
           COALESCE(sp.price, p.price) AS price,
           sp.regular_price,
           sp.unit_price,
@@ -709,7 +714,7 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
           : '';
         if (categoryFilter) wordParams.push(categoryFilter);
         const wordResult = await query(
-          `SELECT DISTINCT p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.price,
+          `SELECT DISTINCT p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.product_intel, p.price,
              NULL as regular_price, NULL as unit_price, 'product' as price_source
            FROM products p
            WHERE (${wordConditions})
@@ -736,6 +741,9 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
       regularPrice: row.regular_price ? parseFloat(row.regular_price) : null,
       unitPrice: row.unit_price ? parseFloat(row.unit_price) : null,
       priceSource: row.price_source,
+      // _productIntel is internal to the re-rank step below; stripped
+      // before the response so the frontend keeps the same contract.
+      _productIntel: row.product_intel || null,
     }));
 
     // Overlay market prices if location provided
@@ -779,6 +787,40 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
         console.error('Market price overlay error:', mpErr.message);
       }
     }
+
+    // ── VEPI re-rank (2026-06-04) ─────────────────────────────
+    // After all candidates are collected and market prices overlaid,
+    // re-rank by Vision-Enhanced Product Intelligence: parse the
+    // user's query into structured form, score each candidate by
+    // type/subtype/is_a/is_not overlap, exclude HARD_EXCLUDE
+    // (search_type appearing in product's is_not - the "Red Baron
+    // Cheese Pizza dropped from cheese search" guarantee).
+    //
+    // Graceful degradation: if OpenAI is unavailable or extractSearchIntel
+    // returns null, we skip the re-rank entirely and return options
+    // in their original order. Products without product_intel score 0
+    // (unprocessed by the worker) and naturally sort behind processed
+    // products with positive scores - but they still appear, so the
+    // backfill window doesn't blank out the picker.
+    try {
+      const searchIntel = await extractSearchIntel(q);
+      if (searchIntel) {
+        const scored = options.map(opt => ({
+          opt,
+          score: scoreProductForSearch(opt._productIntel, searchIntel),
+        }));
+        const filtered = scored.filter(s => s.score !== HARD_EXCLUDE);
+        filtered.sort((a, b) => b.score - a.score);
+        options = filtered.map(s => s.opt);
+      }
+    } catch (vepiErr) {
+      // VEPI failure must NEVER break the endpoint - log and continue
+      // with the un-re-ranked options.
+      console.error('VEPI re-rank error:', vepiErr.message);
+    }
+
+    // Strip the internal _productIntel field before responding.
+    options = options.map(({ _productIntel, ...rest }) => rest);
 
     successResponse(res, { options });
   } catch (error) {

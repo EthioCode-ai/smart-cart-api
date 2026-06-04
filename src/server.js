@@ -33,6 +33,7 @@ const recommendationsRoutes = require('./routes/recommendations');
 const scanMetricsRoutes = require('./routes/scanMetrics');
 const { startCleanupCron: startDriveTimeCleanup } = require('./services/driveTimeService');
 const { startCategorizationWorker } = require('./services/categorizationWorker');
+const { startVisionIntelWorker } = require('./services/visionIntelWorker');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -148,6 +149,10 @@ app.listen(PORT, () => {
   // real taxonomy. Idempotent - re-runs on the next interval if anything
   // fails. Backfill of existing rows happens naturally as the worker runs.
   startCategorizationWorker();
+  // VEPI worker: vision fingerprints products with image_url that don't
+  // have product_intel yet. Same idempotency pattern as SCA. Skips quietly
+  // when the column doesn't exist (pre-migration safe).
+  startVisionIntelWorker();
 });
 
 module.exports = app;
