@@ -602,10 +602,18 @@ router.get('/search', optionalAuth, async (req, res) => {
 // Returns matching products with brands and store prices for list item selection
 router.get('/brand-options', optionalAuth, async (req, res) => {
   try {
-    const { q, storeId, lat, lng, limit = 20 } = req.query;
+    const { q, storeId, lat, lng, limit = 20, category } = req.query;
     if (!q || q.trim().length < 2) {
       return successResponse(res, { options: [] });
     }
+
+    // SCA v2.0.9: optional category filter. When the caller knows the
+    // editing item's department (the frontend BrandPickerModal passes
+    // brandPickerItem.department/category), filter to products in that
+    // same category. This is what eliminates the "Ragu search returns
+    // hummus and veggie fries" noise - the noise still substring-matches
+    // on individual words like 'roasted', but a category filter cuts it.
+    const categoryFilter = category && category.trim().length > 0 ? category.trim() : null;
 
     const words = q.trim().toLowerCase().split(/\s+/).filter(w => w.length >= 2);
     const searchTerm = `%${q.trim().toLowerCase()}%`;
@@ -614,35 +622,44 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
     // Search local products with store prices
     let queryText, params;
 
+    // SCA: category filter clauses spliced in only when categoryFilter is set.
+    // Empty string keeps the existing behavior identical for callers that
+    // don't pass the new param.
+    const catClause = categoryFilter ? ` AND LOWER(p.category) = LOWER($CAT_IDX) ` : '';
+
     if (storeId) {
       // Prefer prices from the specified store, fall back to any store
+      const catParamIdx = 4;
       queryText = `
         SELECT DISTINCT ON (p.id)
           p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
           COALESCE(sp_store.price, sp_any.price, p.price) AS price,
           COALESCE(sp_store.regular_price, sp_any.regular_price) AS regular_price,
           COALESCE(sp_store.unit_price, sp_any.unit_price) AS unit_price,
-          CASE 
+          CASE
             WHEN sp_store.price IS NOT NULL THEN 'store'
             WHEN sp_any.price IS NOT NULL THEN 'other_store'
             ELSE 'product'
           END AS price_source
         FROM products p
-        LEFT JOIN store_prices sp_store 
+        LEFT JOIN store_prices sp_store
           ON sp_store.barcode = p.barcode AND sp_store.store_id = $2
         SELECT price, regular_price, unit_price
-          FROM store_prices 
+          FROM store_prices
           WHERE barcode = p.barcode AND store_id != $2
-          ORDER BY updated_at DESC 
+          ORDER BY updated_at DESC
           LIMIT 1
-        WHERE LOWER(p.name) LIKE $1
+        WHERE (LOWER(p.name) LIKE $1
           OR LOWER(p.brand) LIKE $1
-          OR LOWER(p.category) LIKE $1
+          OR LOWER(p.category) LIKE $1)
+          ${catClause.replace('$CAT_IDX', `$${catParamIdx}`)}
         ORDER BY p.id, sp_store.price NULLS LAST
         LIMIT $3
       `;
       params = [searchTerm, storeId, parseInt(limit)];
+      if (categoryFilter) params.push(categoryFilter);
     } else {
+      const catParamIdx = 3;
       queryText = `
         SELECT DISTINCT ON (p.id)
           p.id, p.name, p.brand, p.category, p.barcode, p.image_url,
@@ -658,13 +675,15 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
           ORDER BY updated_at DESC
           LIMIT 1
         ) sp ON true
-        WHERE LOWER(p.name) LIKE $1
+        WHERE (LOWER(p.name) LIKE $1
           OR LOWER(p.brand) LIKE $1
-          OR LOWER(p.category) LIKE $1
+          OR LOWER(p.category) LIKE $1)
+          ${catClause.replace('$CAT_IDX', `$${catParamIdx}`)}
         ORDER BY p.id
         LIMIT $2
       `;
       params = [searchTerm, parseInt(limit)];
+      if (categoryFilter) params.push(categoryFilter);
     }
 
     let result = await query(queryText, params);
@@ -673,13 +692,24 @@ router.get('/brand-options', optionalAuth, async (req, res) => {
     if (result.rows.length < 3 && words.length > 0) {
       try {
         const wordConditions = words.map((_, i) => `(LOWER(p.name) LIKE $${i + 1} OR LOWER(p.brand) LIKE $${i + 1} OR LOWER(p.category) LIKE $${i + 1})`).join(' OR ');
+        // SCA: category filter on the fallback path too. This is the path
+        // that surfaced the Ragu->hummus/veggie-fries noise in Avi's
+        // screenshot - per-word substring match catches anything with
+        // "roasted" in the name. With category filter, those distinct-
+        // category products are excluded.
+        const wordParams = words.map(w => `%${w}%`);
+        const catWordClause = categoryFilter
+          ? ` AND LOWER(p.category) = LOWER($${wordParams.length + 1}) `
+          : '';
+        if (categoryFilter) wordParams.push(categoryFilter);
         const wordResult = await query(
           `SELECT DISTINCT p.id, p.name, p.brand, p.category, p.barcode, p.image_url, p.price,
              NULL as regular_price, NULL as unit_price, 'product' as price_source
            FROM products p
-           WHERE ${wordConditions}
+           WHERE (${wordConditions})
+             ${catWordClause}
            LIMIT 20`,
-          words.map(w => `%${w}%`)
+          wordParams
         );
         const existingIds = new Set(result.rows.map(r => r.id));
         const newRows = wordResult.rows.filter(r => !existingIds.has(r.id));

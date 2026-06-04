@@ -32,6 +32,7 @@ const predictionsRoutes = require('./routes/predictions');
 const recommendationsRoutes = require('./routes/recommendations');
 const scanMetricsRoutes = require('./routes/scanMetrics');
 const { startCleanupCron: startDriveTimeCleanup } = require('./services/driveTimeService');
+const { startCategorizationWorker } = require('./services/categorizationWorker');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -143,6 +144,10 @@ app.listen(PORT, () => {
   // drive_time_cache: deletes rows >30 min old, every 5 min. unref'd so
   // it never blocks shutdown. Lost-on-restart is fine — cache isn't authoritative.
   startDriveTimeCleanup();
+  // SCA worker: sweeps products with category='grocery' (default) into the
+  // real taxonomy. Idempotent - re-runs on the next interval if anything
+  // fails. Backfill of existing rows happens naturally as the worker runs.
+  startCategorizationWorker();
 });
 
 module.exports = app;
